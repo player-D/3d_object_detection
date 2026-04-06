@@ -1,0 +1,24 @@
+# 指定清华源的 PyTorch CPU 下载通道，速度起飞
+--extra-index-url https://mirrors.tuna.tsinghua.edu.cn/pytorch/whl/cpu
+
+# 深度学习核心框架
+torch==2.1.2
+torchvision==0.16.2
+torchaudio==2.1.2
+
+# 3D 视觉与 nuScenes 官方依赖
+nuscenes-devkit==1.1.11
+pyquaternion==0.9.9
+
+# 数学运算与目标匹配
+scipy==1.10.1
+numpy<2.0.0
+
+# 图像处理与可视化
+opencv-python>=4.5.5.64
+Pillow>=9.0.0
+matplotlib>=3.5.0
+
+# 进度条与命令行工具
+tqdm>=4.65.0
+fire>=0.4.0

@@ -1,0 +1,309 @@
+:root {
+  --primary-color: #00c0ff;
+  --secondary-color: #0088cc;
+  --bg-primary: #0a0a0a;
+  --bg-secondary: #1a1a1a;
+  --bg-tertiary: #2a2a2a;
+  --text-primary: #ffffff;
+  --text-secondary: #b0b0b0;
+  --text-tertiary: #808080;
+  --border-color: #3a3a3a;
+  --success-color: #00ff88;
+  --warning-color: #ffaa00;
+  --error-color: #ff4444;
+  --shadow:
+    rgba(0, 0, 0, 0.5) 0 10px 20px -5px, rgba(0, 192, 255, 0.1) 0 0 0 1px;
+  --glow: 0 0 10px rgba(0, 192, 255, 0.5);
+  --transition: all 0.3s ease;
+
+  --sans: system-ui, 'Segoe UI', Roboto, sans-serif;
+  --heading: system-ui, 'Segoe UI', Roboto, sans-serif;
+  --mono: ui-monospace, Consolas, monospace;
+
+  font: 16px/145% var(--sans);
+  letter-spacing: 0.18px;
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  margin: 0;
+  overflow-x: hidden;
+}
+
+#app {
+  min-height: 100vh;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+/* 自定义滚动条 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg-secondary);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--primary-color);
+}
+
+/* 通用动画 */
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.3s ease;
+}
+
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}
+
+.slide-enter-active,
+.slide-leave-active {
+  transition: transform 0.3s ease;
+}
+
+.slide-enter-from {
+  transform: translateX(-100%);
+}
+
+.slide-leave-to {
+  transform: translateX(100%);
+}
+
+/* 卡片样式 */
+.custom-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  transition: var(--transition);
+  overflow: hidden;
+}
+
+.custom-card:hover {
+  box-shadow: var(--glow), var(--shadow);
+  border-color: var(--primary-color);
+}
+
+/* 按钮样式 */
+.custom-button {
+  transition: var(--transition);
+}
+
+.custom-button:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--glow);
+}
+
+/* 输入框样式 */
+.custom-input {
+  background: var(--bg-tertiary) !important;
+  border: 1px solid var(--border-color) !important;
+  color: var(--text-primary) !important;
+  transition: var(--transition);
+}
+
+.custom-input:focus {
+  border-color: var(--primary-color) !important;
+  box-shadow: var(--glow) !important;
+}
+
+/* 滑块样式 */
+.custom-slider .el-slider__bar {
+  background-color: var(--primary-color) !important;
+}
+
+.custom-slider .el-slider__button {
+  border-color: var(--primary-color) !important;
+  box-shadow: var(--glow) !important;
+}
+
+/* 统计卡片样式 */
+.stat-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 20px;
+  transition: var(--transition);
+  position: relative;
+  overflow: hidden;
+}
+
+.stat-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 4px;
+  height: 100%;
+  background: var(--primary-color);
+}
+
+.stat-card:hover {
+  box-shadow: var(--glow), var(--shadow);
+  transform: translateY(-2px);
+}
+
+.stat-value {
+  font-size: 24px;
+  font-weight: bold;
+  color: var(--primary-color);
+  margin-bottom: 8px;
+}
+
+.stat-label {
+  font-size: 14px;
+  color: var(--text-secondary);
+}
+
+/* 响应式设计 */
+@media (max-width: 1200px) {
+  .sidebar {
+    width: 320px !important;
+  }
+}
+
+@media (max-width: 768px) {
+  .sidebar {
+    width: 100% !important;
+    height: auto !important;
+    position: relative !important;
+  }
+  
+  .main-content {
+    margin-left: 0 !important;
+  }
+}
+
+/* 加载动画 */
+.loading-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(10, 10, 10, 0.9);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  z-index: 9999;
+}
+
+.loading-spinner {
+  width: 60px;
+  height: 60px;
+  border: 4px solid var(--bg-tertiary);
+  border-top: 4px solid var(--primary-color);
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+  margin-bottom: 20px;
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+/* 图像查看器样式 */
+.image-container {
+  position: relative;
+  overflow: hidden;
+  border-radius: 8px;
+  background: var(--bg-tertiary);
+  transition: var(--transition);
+}
+
+.image-container:hover {
+  box-shadow: var(--glow);
+}
+
+/* 头部样式 */
+.header {
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-color);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
+  transition: var(--transition);
+}
+
+.header:hover {
+  box-shadow: 0 2px 15px rgba(0, 192, 255, 0.2);
+}
+
+/* 状态指示器 */
+.status-indicator {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 8px;
+}
+
+.status-online {
+  background: var(--success-color);
+  box-shadow: 0 0 8px var(--success-color);
+}
+
+.status-offline {
+  background: var(--error-color);
+  box-shadow: 0 0 8px var(--error-color);
+}
+
+/* 模式切换按钮 */
+.mode-button {
+  transition: var(--transition);
+}
+
+.mode-button.active {
+  background: var(--primary-color) !important;
+  color: var(--bg-primary) !important;
+}
+
+/* 空状态样式 */
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  height: 400px;
+  background: var(--bg-secondary);
+  border: 1px dashed var(--border-color);
+  border-radius: 8px;
+  color: var(--text-tertiary);
+}
+
+/* 通知样式 */
+.el-notification {
+  background: var(--bg-secondary) !important;
+  border: 1px solid var(--border-color) !important;
+  color: var(--text-primary) !important;
+}
+
+/* 消息框样式 */
+.el-message-box {
+  background: var(--bg-secondary) !important;
+  border: 1px solid var(--border-color) !important;
+  color: var(--text-primary) !important;
+}
+
+.el-message-box__header {
+  border-bottom: 1px solid var(--border-color) !important;
+}
+
+.el-message-box__footer {
+  border-top: 1px solid var(--border-color) !important;
+}

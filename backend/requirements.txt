@@ -1,0 +1,11 @@
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+pydantic>=2.0.0
+python-multipart>=0.0.9
+numpy<2.0.0
+opencv-python>=4.8.0
+pyquaternion>=0.9.9
+nuscenes-devkit>=1.1.11
+
+# 注意：torch 建议保留你当前环境已安装的 GPU 版本，不需要在此强制重新下载
+# torch>=2.0.0
