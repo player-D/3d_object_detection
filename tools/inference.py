@@ -348,8 +348,14 @@ def draw_box(img, points_2d, depth, color, thickness=1):
     if not np.any(valid_mask):
         return img, None, False
     
-    # 检查是否有 NaN
-    if np.any(np.isnan(points_2d)):
+    # 过滤掉深度小于 0.5 的点
+    if np.any(depth < 0.5):
+        return img, None, False
+    
+    # 检查是否有 NaN 或无穷值
+    if np.any(np.isnan(points_2d)) or np.any(np.isinf(points_2d)):
+        return img, None, False
+    if np.any(np.isnan(depth)) or np.any(np.isinf(depth)):
         return img, None, False
     
     # 严格的坐标边界检查和截断

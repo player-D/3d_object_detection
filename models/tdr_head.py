@@ -216,6 +216,7 @@ class TDRHead(nn.Module):
             for _ in range(num_decoder_layers - 1)
         ])
         self.refine_scale = 0.05
+        self.debug = False
         
         # Query 初始化
         self.query_embed = nn.Sequential(
@@ -238,10 +239,6 @@ class TDRHead(nn.Module):
         # =========================================================
 
     def forward(self, mlvl_feats, boxes_2d, cam_intrinsics, cam_extrinsics, temporal_depth_prior=None):
-        """
-        mlvl_feats: list of [B, N_cam, C, H, W]
-        """
-        # 1. 初始 reference points
         reference_points, key_padding_mask = self.lifting(
             boxes_2d, cam_intrinsics, cam_extrinsics, temporal_depth_prior
         )
@@ -249,47 +246,49 @@ class TDRHead(nn.Module):
         reference_points = torch.nan_to_num(reference_points, nan=0.5, posinf=1.0, neginf=0.0)
         reference_points = torch.clamp(reference_points, 0.0, 1.0)
 
-        # 2. MRoPE
         pos_sin, pos_cos = self.m_rope(reference_points)
 
-        # 3. 初始化 query
         query = self.query_embed(reference_points)
         query = query * pos_cos + rotate_half(query) * pos_sin
 
-        # 4. Decoder + Reference Refinement
         for layer_idx, layer in enumerate(self.decoder_layers):
-            query = layer(query, reference_points, key_padding_mask,
-                          cam_intrinsics, cam_extrinsics, mlvl_feats)
-            
-            # 专属微调分支：逐层更新 reference_points
+            query = layer(
+                query,
+                reference_points,
+                key_padding_mask,
+                cam_intrinsics,
+                cam_extrinsics,
+                mlvl_feats
+            )
+
             if layer_idx < len(self.decoder_layers) - 1:
                 delta_ref = self.refine_branches[layer_idx](query)
                 delta_ref = torch.tanh(delta_ref) * self.refine_scale
-                
-                # 更新并截断在 [0, 1] 空间内
+
                 reference_points = reference_points + delta_ref
                 reference_points = torch.clamp(reference_points, 0.0, 1.0)
 
-        # 5. 最终的分类和回归预测
+                if self.debug:
+                    print(
+                        f"[Layer {layer_idx}] ref mean={reference_points[..., 2].mean().item():.4f}, "
+                        f"std={reference_points[..., 2].std().item():.4f}"
+                    )
+
         cls_scores = self.cls_branches(query)
         bbox_preds = self.reg_branches(query)
 
-        # 6. 最终几何约束防爆处理
-        # 限制最终的 xyz 物理偏移在 ±4 米内，避免飞点
         xyz_offset = torch.tanh(bbox_preds[..., 0:3]) * 4.0
-        
         min_range, max_range = -51.2, 51.2
         reference_points_denorm = reference_points * (max_range - min_range) + min_range
         xyz = reference_points_denorm + xyz_offset
-        
-        # 强力截断极端坐标
+
         xyz[..., 0] = torch.clamp(xyz[..., 0], -51.2, 51.2)
         xyz[..., 1] = torch.clamp(xyz[..., 1], -51.2, 51.2)
         xyz[..., 2] = torch.clamp(xyz[..., 2], 0.0, 80.0)
 
         wlh = torch.exp(torch.clamp(bbox_preds[..., 3:6], min=-4.0, max=4.0))
         wlh = torch.clamp(wlh, min=0.2, max=20.0)
-        
+
         rest = bbox_preds[..., 6:]
         bbox_preds = torch.cat([xyz, wlh, rest], dim=-1)
 
