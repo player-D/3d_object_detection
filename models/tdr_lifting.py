@@ -3,10 +3,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class TDRLifting(nn.Module):
-    def __init__(self, num_depth_dense=48, num_depth_local=8,   # 将 32 改为 48
-                 depth_range=[1.0, 60.0], iou_threshold=0.05,   # 将 0.06/0.10 降为 0.05
+    def __init__(self, num_depth_dense=32, num_depth_local=8,   # 收紧参数
+                 depth_range=[2.0, 55.0], iou_threshold=0.20,   # 收紧参数
                  space_range=[-51.2, 51.2],
-                 max_queries=400):  # 新增参数，默认给全量配置
+                 max_queries=300):  # 收紧参数
         super().__init__()
         self.num_depth_dense = num_depth_dense
         self.num_depth_local = num_depth_local
@@ -99,9 +99,20 @@ class TDRLifting(nn.Module):
         box_size = torch.clamp(box_size, 8, 200)
         pseudo_boxes = torch.cat([points_img - box_size/2, points_img + box_size/2], dim=-1)
         
+        # 【新增：物理有效性深度约束】
+        # 1. 深度必须大于 1.5 米且小于 60 米
+        physical_valid_mask = (depth_scale.squeeze(-1) > 1.5) & (depth_scale.squeeze(-1) < 60.0)
+        # 2. pseudo_boxes 尺寸不能大得离谱（防止近处除零或透视畸变导致占据整个屏幕）
+        box_areas = (pseudo_boxes[..., 2] - pseudo_boxes[..., 0]) * (pseudo_boxes[..., 3] - pseudo_boxes[..., 1])
+        reasonable_size_mask = box_areas < (800 * 448 * 0.8) # 伪框不能超过画面的 80%
+        
+        # 合并物理有效性 Mask
+        strict_valid_mask = physical_valid_mask & reasonable_size_mask
+        
         boxes_2d_exp = boxes_2d.unsqueeze(-2).repeat(1, 1, 1, D, 1)
         iou = self._compute_iou(pseudo_boxes, boxes_2d_exp)
-        consistency_mask = iou > self.iou_threshold
+        # 必须同时满足 IoU 阈值和绝对物理有效性
+        consistency_mask = (iou > self.iou_threshold) & strict_valid_mask
         
         final_mask = consistency_mask & valid_box_mask.unsqueeze(-1)
         
@@ -114,6 +125,10 @@ class TDRLifting(nn.Module):
             batch_areas = areas[b].unsqueeze(-1).repeat(1, 1, D).flatten()[batch_mask]
             
             valid_pts = batch_points[batch_mask]
+            
+            # 物理过滤：确保点有效且深度在合理范围内
+            valid_pts = valid_pts[torch.isfinite(valid_pts).all(dim=-1)]
+            valid_pts = valid_pts[(valid_pts[..., 2] > 1.0) & (valid_pts[..., 2] < 70.0)]
             
             if valid_pts.shape[0] == 0:
                 valid_pts = torch.zeros(1, 3, device=device)

@@ -88,7 +88,7 @@ def tensor_to_bgr_image(img_tensor):
     img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
     return img
 
-def load_model(device, is_overfit=False, checkpoint_path='./saved_models/04_02_16-59/tdr_qaf_epoch_40.pth'):
+def load_model(device, is_overfit=False, checkpoint_path='./saved_models/04_07_13-37/tdr_qaf_epoch_20.pth'):
     """加载模型
     
     Args:
@@ -198,8 +198,10 @@ def run_model(model, images, boxes_2d, cam_intrinsics, cam_extrinsics):
     
     return cls_scores, bbox_preds
 
-def decode_bbox(cls_scores, bbox_preds, threshold=0.0, topk=None):
-    """解码边界框（带详细调试信息）"""
+def decode_bbox(cls_scores, bbox_preds, threshold=0.05, topk=50, nms_dist=1.5):
+    """
+    返回: pred_scores, pred_labels, pred_bboxes
+    """
     if cls_scores.dim() == 3:
         cls_scores = cls_scores[0]
     if bbox_preds.dim() == 3:
@@ -225,24 +227,57 @@ def decode_bbox(cls_scores, bbox_preds, threshold=0.0, topk=None):
     # =========================================================
     
     # 取前10类最大得分和对应标签
-    scores, labels = torch.max(prob[..., :10], dim=-1)   # [Num_Query]
-    
-    # 过滤得分 > threshold
-    mask = scores > threshold
-    scores = scores[mask]
-    labels = labels[mask]
-    bbox_preds = bbox_preds[mask]
-    
-    # 按得分排序取前 topk 个
-    if topk is not None and len(scores) > topk:
-        topk_indices = torch.argsort(scores, descending=True)[:topk]
-        scores = scores[topk_indices]
-        labels = labels[topk_indices]
-        bbox_preds = bbox_preds[topk_indices]
-    
-    print(f'最终保留的预测框数量：{len(scores)}\n')
-    
-    return scores, labels, bbox_preds
+    pred_scores, pred_labels = torch.max(prob[..., :10], dim=-1)   # [Num_Query]
+
+    valid_mask = torch.isfinite(pred_scores)
+    valid_mask &= torch.isfinite(bbox_preds).all(dim=-1)
+    valid_mask &= pred_scores >= threshold
+
+    pred_scores = pred_scores[valid_mask]
+    pred_labels = pred_labels[valid_mask]
+    pred_bboxes = bbox_preds[valid_mask]
+
+    if pred_scores.numel() == 0:
+        print(f'最终保留的预测框数量：0\n')
+        return pred_scores, pred_labels, pred_bboxes
+
+    # 先做尺寸/深度硬过滤，防止极端值
+    pred_bboxes[:, 2] = torch.clamp(pred_bboxes[:, 2], 0.0, 80.0)
+    pred_bboxes[:, 3:6] = torch.clamp(pred_bboxes[:, 3:6], 0.2, 20.0)
+
+    # topk
+    if pred_scores.shape[0] > topk:
+        idx = torch.topk(pred_scores, topk).indices
+        pred_scores = pred_scores[idx]
+        pred_labels = pred_labels[idx]
+        pred_bboxes = pred_bboxes[idx]
+
+    # class-aware BEV center-distance NMS
+    order = torch.argsort(pred_scores, descending=True)
+    keep = []
+    centers = pred_bboxes[:, :2]
+
+    for idx in order.tolist():
+        ok = True
+        for j in keep:
+            if pred_labels[idx] != pred_labels[j]:
+                continue
+
+            dist = torch.norm(centers[idx] - centers[j])
+            size_i = torch.sqrt(pred_bboxes[idx, 3] * pred_bboxes[idx, 4])
+            size_j = torch.sqrt(pred_bboxes[j, 3] * pred_bboxes[j, 4])
+            thr = 0.7 * torch.max(size_i, size_j) + nms_dist
+
+            if dist < thr:
+                ok = False
+                break
+
+        if ok:
+            keep.append(idx)
+
+    keep = torch.tensor(keep, device=pred_scores.device, dtype=torch.long)
+    print(f'最终保留的预测框数量：{len(keep)}\n')
+    return pred_scores[keep], pred_labels[keep], pred_bboxes[keep]
 
 def build_box_from_vec(bbox_vec):
     """从向量构建 Box 对象
@@ -251,9 +286,23 @@ def build_box_from_vec(bbox_vec):
         bbox_vec: 边界框向量 [x, y, z, w, l, h, sin_yaw, cos_yaw, vx, vy]
     
     Returns:
-        Box 对象
+        Box 对象或 None（如果无效）
     """
-    x, y, z, w, l, h, sin_yaw, cos_yaw = bbox_vec[:8]
+    vec = np.asarray(bbox_vec, dtype=np.float32)
+
+    if not np.all(np.isfinite(vec)):
+        return None
+
+    x, y, z, w, l, h, sin_yaw, cos_yaw = vec[:8]
+
+    # 硬过滤：深度、尺寸都必须合理
+    if z < 0.5 or z > 80.0:
+        return None
+    if min(w, l, h) < 0.2:
+        return None
+    if max(w, l, h) > 20.0:
+        return None
+
     yaw = np.arctan2(sin_yaw, cos_yaw)
     return Box(
         center=[float(x), float(y), float(z)],
@@ -623,9 +672,9 @@ def visualize(images, cam_intrinsics, gt_bboxes, gt_labels, pred_scores, pred_la
     if len(pred_bboxes) > 0:
         for bbox in pred_bboxes:
             bbox_np = bbox.detach().cpu().numpy()
-            # 不再过滤畸形尺寸，即使是奇怪的预测框也画出来
-            # if bbox_np[3] <= 0.1: continue
             box = build_box_from_vec(bbox_np)
+            if box is None:
+                continue
             draw_bev_box(box, (0, 0, 255)) # BGR: Red
             
     # 保存结果（如果指定了输出目录）

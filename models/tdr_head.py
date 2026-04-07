@@ -191,10 +191,10 @@ class TDRHead(nn.Module):
         # TDRLifting（会返回 reference_points 和 key_padding_mask）
         self.lifting = TDRLifting(
             num_depth_dense=num_depth_dense,      # 使用传入参数
-            num_depth_local=8 ,       
-            depth_range=[1.0, 60.0 ],
-            iou_threshold=0.12 ,      
-            space_range=[-51.2, 51.2 ],
+            num_depth_local=8,       
+            depth_range=[2.0, 50.0],  # 缩紧物理深度探测范围
+            iou_threshold=0.35,       # 大幅提高 IoU 阈值，杀掉射线上的歧义点
+            space_range=[-51.2, 51.2],
             max_queries=max_queries               # 使用传入参数
         )
         
@@ -205,6 +205,17 @@ class TDRHead(nn.Module):
         self.decoder_layers = nn.ModuleList([
             DecoderLayer(embed_dims) for _ in range(num_decoder_layers) # 使用传入参数
         ])
+        
+        # 专属的 reference_points 微调分支
+        self.refine_branches = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(embed_dims, embed_dims),
+                nn.ReLU(),
+                nn.Linear(embed_dims, 3)
+            )
+            for _ in range(num_decoder_layers - 1)
+        ])
+        self.refine_scale = 0.05
         
         # Query 初始化
         self.query_embed = nn.Sequential(
@@ -230,35 +241,55 @@ class TDRHead(nn.Module):
         """
         mlvl_feats: list of [B, N_cam, C, H, W]
         """
-        # 1. Lifting 生成参考点和 padding mask
+        # 1. 初始 reference points
         reference_points, key_padding_mask = self.lifting(
             boxes_2d, cam_intrinsics, cam_extrinsics, temporal_depth_prior
         )
-        B, Num_Query, _ = reference_points.shape
 
-        # 2. MRoPE 位置编码
+        reference_points = torch.nan_to_num(reference_points, nan=0.5, posinf=1.0, neginf=0.0)
+        reference_points = torch.clamp(reference_points, 0.0, 1.0)
+
+        # 2. MRoPE
         pos_sin, pos_cos = self.m_rope(reference_points)
 
-        # 3. 初始化 Query 并施加旋转位置编码
+        # 3. 初始化 query
         query = self.query_embed(reference_points)
         query = query * pos_cos + rotate_half(query) * pos_sin
 
-        # 4. Decoder 层（已传入 key_padding_mask）
-        for layer in self.decoder_layers:
-            query = layer(query, reference_points, key_padding_mask, 
+        # 4. Decoder + Reference Refinement
+        for layer_idx, layer in enumerate(self.decoder_layers):
+            query = layer(query, reference_points, key_padding_mask,
                           cam_intrinsics, cam_extrinsics, mlvl_feats)
+            
+            # 专属微调分支：逐层更新 reference_points
+            if layer_idx < len(self.decoder_layers) - 1:
+                delta_ref = self.refine_branches[layer_idx](query)
+                delta_ref = torch.tanh(delta_ref) * self.refine_scale
+                
+                # 更新并截断在 [0, 1] 空间内
+                reference_points = reference_points + delta_ref
+                reference_points = torch.clamp(reference_points, 0.0, 1.0)
 
-        # 5. 分类和回归预测
+        # 5. 最终的分类和回归预测
         cls_scores = self.cls_branches(query)
         bbox_preds = self.reg_branches(query)
 
-        # 后处理：坐标偏移 + 尺寸 exp 处理
-        xyz_offset = bbox_preds[..., 0:3]
+        # 6. 最终几何约束防爆处理
+        # 限制最终的 xyz 物理偏移在 ±4 米内，避免飞点
+        xyz_offset = torch.tanh(bbox_preds[..., 0:3]) * 4.0
+        
         min_range, max_range = -51.2, 51.2
         reference_points_denorm = reference_points * (max_range - min_range) + min_range
-        
         xyz = reference_points_denorm + xyz_offset
-        wlh = torch.exp(torch.clamp(bbox_preds[..., 3:6], min=-5.0, max=5.0))
+        
+        # 强力截断极端坐标
+        xyz[..., 0] = torch.clamp(xyz[..., 0], -51.2, 51.2)
+        xyz[..., 1] = torch.clamp(xyz[..., 1], -51.2, 51.2)
+        xyz[..., 2] = torch.clamp(xyz[..., 2], 0.0, 80.0)
+
+        wlh = torch.exp(torch.clamp(bbox_preds[..., 3:6], min=-4.0, max=4.0))
+        wlh = torch.clamp(wlh, min=0.2, max=20.0)
+        
         rest = bbox_preds[..., 6:]
         bbox_preds = torch.cat([xyz, wlh, rest], dim=-1)
 
