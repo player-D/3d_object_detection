@@ -88,7 +88,7 @@ class TDRDetector(nn.Module):
         self.num_decoder_layers = num_decoder_layers
         
         # 定义 Backbone (ResNet50)
-        backbone = resnet50(pretrained=True)
+        backbone = resnet50(weights='IMAGENET1K_V1')
         # 提取 Backbone 的主要层
         self.backbone = nn.ModuleDict({
             'conv1': backbone.conv1,

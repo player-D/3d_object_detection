@@ -25,21 +25,20 @@ def setup_logging(log_dir):
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=[logging.FileHandler(log_file), logging.StreamHandler()]
+        handlers=[logging.FileHandler(log_file, encoding='utf-8'), logging.StreamHandler()]
     )
     return logging.getLogger(__name__)
 
 def main():
     parser = argparse.ArgumentParser(description='TDR-QAF 3D Object Detection Training')
     parser.add_argument('--epochs', type=int, default=300, help='Number of training epochs')
-    parser.add_argument('--data_root', type=str, default='./dataset/nuscenes', help='Dataset root path')
+    parser.add_argument('--data_root', type=str, default='./dataset', help='Dataset root path')
     parser.add_argument('--num_workers', type=int, default=0, help='Number of data loading workers')
     parser.add_argument('--batch_size', type=int, default=2, help='Batch size') # 降为 2
     parser.add_argument('--lr', type=float, default=1e-4, help='Initial learning rate') 
     parser.add_argument('--pretrained', type=str, default='', help='Pre-trained weight .pth file path')
     parser.add_argument('--resume', type=str, default='', help='Resume training from checkpoint .pth file path')
     parser.add_argument('--output_dir', type=str, default='output', help='Output directory')
-    parser.add_argument('--overfit', action='store_true', help='开启本地过拟合测试模式（简化模型）' )
     parser.add_argument('--overfit', action='store_true', help='开启本地过拟合测试模式（简化模型）' )
     args = parser.parse_args()
     

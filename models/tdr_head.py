@@ -57,44 +57,55 @@ class CrossAttention(nn.Module):
                 ref_points, torch.ones(B, Num_Query, 1, device=ref_points.device, dtype=ref_points.dtype)
             ], dim=-1)
 
+            # 反外参：世界/Ego → Camera
             inv_extrinsics = torch.inverse(curr_extrinsics)
+            inv_extrinsics = torch.nan_to_num(inv_extrinsics, nan=0.0, posinf=1e6, neginf=-1e6)
             points_cam_hom = torch.matmul(reference_points_hom, inv_extrinsics.transpose(-1, -2))
             
-            # ================== 3. 【背后鬼影防御 & 越界截断】 ==================
+            # ================== 【核心防护】提取深度，处理背后点和极近点 ==================
             depth = points_cam_hom[..., 2:3]
-            invalid_mask = (depth <= 0.1).squeeze(-1)
+            depth = torch.nan_to_num(depth, nan=1.0, posinf=100.0, neginf=0.1)
             
-            points_cam = points_cam_hom[..., :3] / (depth + 1e-6)
-            points_img_hom = torch.matmul(points_cam, curr_intrinsics.transpose(-1, -2))
-            points_img = points_img_hom[..., :2] / (points_img_hom[..., 2:3] + 1e-6)
-
-            # === 加强版 grid_sample（处理越界 + 无效点）===
+            # 相机背后或极近的点标记为无效 (Z < 0.1)
+            invalid_mask = (depth.squeeze(-1) < 0.1)  # [B, Num_Query]
+            # 最小 0.1 米，彻底防止透视投影时的除零爆炸
+            depth_safe = torch.clamp(depth, min=0.1)
+            
+            # 归一化到相机平面 (X/Z, Y/Z, 1)
+            points_cam = points_cam_hom[..., :3] / depth_safe
+            
+            # 乘内参得到图像像素坐标
+            if curr_intrinsics.shape[-2:] == (4, 4):
+                curr_intrinsics = curr_intrinsics[..., :3, :3]
+            points_img_hom = torch.matmul(points_cam.unsqueeze(-2), curr_intrinsics.transpose(-1, -2)).squeeze(-2)
+            # 由于 points_cam 的 Z 已经是 1，此时 points_img_hom 的 XY 即为像素坐标
+            points_img = points_img_hom[..., :2]
+            
+            # ================== 特征图归一化与裁剪 ==================
             H_feat = img_feats.shape[3]
             W_feat = img_feats.shape[4]
-            orig_W = 800.0  # 确保这和你数据集真实 resize 后的尺寸一致！
+            orig_W = 800.0
             orig_H = 448.0
-            
             scale_x = W_feat / orig_W
             scale_y = H_feat / orig_H
+            
             feat_x = points_img[..., 0] * scale_x
             feat_y = points_img[..., 1] * scale_y
             
-            # 强力 clip：把明显超出图像范围的点也视为无效
-            valid_proj_mask = (feat_x >= -50) & (feat_x <= W_feat + 50) & \
-                               (feat_y >= -50) & (feat_y <= H_feat + 50)
-            final_invalid = invalid_mask | (~valid_proj_mask)
+            # 归一化到 [-1, 1] 供 grid_sample 使用
+            grid_x = torch.clamp((feat_x / (W_feat - 1.0)) * 2.0 - 1.0, -10.0, 10.0)
+            grid_y = torch.clamp((feat_y / (H_feat - 1.0)) * 2.0 - 1.0, -10.0, 10.0)
+            grid = torch.stack([grid_x, grid_y], dim=-1)  # [B, Num_Query, 2]
             
-            grid = torch.zeros_like(points_img)
-            grid[..., 0] = torch.clamp((feat_x / (W_feat - 1.0)) * 2.0 - 1.0, -10.0, 10.0)
-            grid[..., 1] = torch.clamp((feat_y / (H_feat - 1.0)) * 2.0 - 1.0, -10.0, 10.0)
-            grid[final_invalid] = -100.0
-            grid = grid.unsqueeze(2)
+            # 将无效点（相机背后）的采样坐标设为 -100，彻底防止污染
+            grid[invalid_mask] = -100.0
+            grid = grid.unsqueeze(2)  # [B, Num_Query, 1, 2]
             
             # [强诊断打印]
+            valid_ratio = (~invalid_mask).float().mean()
             print(f"[CrossAttn Debug] Cam {cam_idx} | feat_shape: {img_feats[:, cam_idx].shape} | " 
-                  f"points_img range: {points_img[..., 0].min():.1f}~{points_img[..., 0].max():.1f}, " 
-                  f"{points_img[..., 1].min():.1f}~{points_img[..., 1].max():.1f}")
-            print(f"[CrossAttn Debug] normalized range: {grid.min():.3f} ~ {grid.max():.3f} | valid ratio: {(~final_invalid).float().mean():.3f}")
+                  f"points_img X range: {points_img[..., 0].min():.1f}~{points_img[..., 0].max():.1f} | " 
+                  f"valid ratio: {valid_ratio:.3f}")
 
             sampled = F.grid_sample(
                 img_feats[:, cam_idx], grid,
