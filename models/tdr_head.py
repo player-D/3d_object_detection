@@ -11,6 +11,12 @@ def rotate_half(x):
     return torch.cat((-x2, x1), dim=-1)
 
 
+def inverse_sigmoid(x, eps=1e-5):
+    """计算 sigmoid 的逆函数，用于在 logit 空间进行迭代更新"""
+    x = x.clamp(min=eps, max=1 - eps)
+    return torch.log(x / (1 - x))
+
+
 class CrossAttention(nn.Module):
     """
     Cross-Attention 模块
@@ -206,17 +212,14 @@ class TDRHead(nn.Module):
             DecoderLayer(embed_dims) for _ in range(num_decoder_layers) # 使用传入参数
         ])
         
-        # 专属的 reference_points 微调分支
-        self.refine_branches = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(embed_dims, embed_dims),
-                nn.ReLU(),
-                nn.Linear(embed_dims, 3)
-            )
-            for _ in range(num_decoder_layers - 1)
-        ])
-        self.refine_scale = 0.05
-        self.debug = False
+        # 参考点精炼头（共享参数，更稳）
+        self.refine_head = nn.Sequential(
+            nn.Linear(embed_dims, embed_dims),
+            nn.ReLU(),
+            nn.Linear(embed_dims, 3)
+        )
+        self.refine_scale = 0.25   # 推荐 0.2~0.25，先用 0.25
+        self.debug = True          # 训练时可开，正式跑大训练时可关
         
         # Query 初始化
         self.query_embed = nn.Sequential(
@@ -248,9 +251,11 @@ class TDRHead(nn.Module):
 
         pos_sin, pos_cos = self.m_rope(reference_points)
 
+        # 3. 初始化 Query 并施加旋转位置编码
         query = self.query_embed(reference_points)
         query = query * pos_cos + rotate_half(query) * pos_sin
 
+        # 4. Decoder 层：逐层 refinement reference_points
         for layer_idx, layer in enumerate(self.decoder_layers):
             query = layer(
                 query,
@@ -261,34 +266,37 @@ class TDRHead(nn.Module):
                 mlvl_feats
             )
 
+            # 最后一层不再更新 reference_points
             if layer_idx < len(self.decoder_layers) - 1:
-                delta_ref = self.refine_branches[layer_idx](query)
-                delta_ref = torch.tanh(delta_ref) * self.refine_scale
+                delta = self.refine_head(query)  # [B, Num_Query, 3]
 
-                reference_points = reference_points + delta_ref
-                reference_points = torch.clamp(reference_points, 0.0, 1.0)
+                # 在 logit 空间更新，和官方 Deformable DETR 一致
+                ref = inverse_sigmoid(reference_points)
+                ref = ref + delta * self.refine_scale
+                reference_points = torch.sigmoid(ref).detach()
 
+                # 调试打印：看 reference_points 是否真的在拉开
                 if self.debug:
+                    z_mean = reference_points[..., 2].mean().item()
+                    z_std = reference_points[..., 2].std().item()
+                    delta_norm = (delta * self.refine_scale).norm().item()
                     print(
-                        f"[Layer {layer_idx}] ref mean={reference_points[..., 2].mean().item():.4f}, "
-                        f"std={reference_points[..., 2].std().item():.4f}"
+                        f"[Refine Debug] Layer {layer_idx} | "
+                        f"Z mean: {z_mean:.4f}  Z std: {z_std:.4f}  "
+                        f"delta_norm: {delta_norm:.4f}"
                     )
 
         cls_scores = self.cls_branches(query)
         bbox_preds = self.reg_branches(query)
 
-        xyz_offset = torch.tanh(bbox_preds[..., 0:3]) * 4.0
+        xyz_offset = bbox_preds[..., 0:3]
+        xyz_offset = torch.clamp(xyz_offset, -12.0, 12.0)
+
         min_range, max_range = -51.2, 51.2
         reference_points_denorm = reference_points * (max_range - min_range) + min_range
         xyz = reference_points_denorm + xyz_offset
 
-        xyz[..., 0] = torch.clamp(xyz[..., 0], -51.2, 51.2)
-        xyz[..., 1] = torch.clamp(xyz[..., 1], -51.2, 51.2)
-        xyz[..., 2] = torch.clamp(xyz[..., 2], 0.0, 80.0)
-
-        wlh = torch.exp(torch.clamp(bbox_preds[..., 3:6], min=-4.0, max=4.0))
-        wlh = torch.clamp(wlh, min=0.2, max=20.0)
-
+        wlh = torch.exp(torch.clamp(bbox_preds[..., 3:6], min=-5.0, max=5.0))
         rest = bbox_preds[..., 6:]
         bbox_preds = torch.cat([xyz, wlh, rest], dim=-1)
 
