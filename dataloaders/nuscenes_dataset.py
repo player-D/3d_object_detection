@@ -208,7 +208,7 @@ class NuScenesDataset(Dataset):
         cam_extrinsics = torch.stack(cam_extrinsics).float()
 
         if all_gt_bboxes:
-            gt_bboxes = torch.tensor(all_gt_bboxes, dtype=torch.float32)
+            gt_bboxes = torch.tensor(np.array(all_gt_bboxes), dtype=torch.float32)
             gt_labels = torch.tensor(all_gt_labels, dtype=torch.long)
         else:
             gt_bboxes = torch.empty((0, 10), dtype=torch.float32)

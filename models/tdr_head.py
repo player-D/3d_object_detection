@@ -77,7 +77,10 @@ class CrossAttention(nn.Module):
             # 乘内参得到图像像素坐标
             if curr_intrinsics.shape[-2:] == (4, 4):
                 curr_intrinsics = curr_intrinsics[..., :3, :3]
-            points_img_hom = torch.matmul(points_cam.unsqueeze(-2), curr_intrinsics.transpose(-1, -2)).squeeze(-2)
+            
+            # 【核心修复】：直接使用 matmul，[B, Num_Query, 3] x [B, 3, 3]
+            points_img_hom = torch.matmul(points_cam, curr_intrinsics.transpose(-1, -2))
+            
             # 由于 points_cam 的 Z 已经是 1，此时 points_img_hom 的 XY 即为像素坐标
             points_img = points_img_hom[..., :2]
             
