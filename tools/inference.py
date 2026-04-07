@@ -764,4 +764,7 @@ def main():
 
 if __name__ == '__main__':
     main()
-    #第二次
+    # 确保结果保存到 results 目录
+    import os
+    os.makedirs('results', exist_ok=True)
+    print(f"✅ 推理完成，结果已保存至: {os.path.abspath('results')}")

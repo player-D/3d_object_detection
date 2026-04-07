@@ -141,10 +141,8 @@ class TDRDetector(nn.Module):
         # 经过 FPN
         fpn_feats = self.neck([layer1_feat, layer2_feat, layer3_feat, layer4_feat])
         
-        # 这里我们使用最高分辨率的特征层，以保证3D检测的定位精度
-        feat = fpn_feats[0]
-        
-        return feat
+        # 返回全部 4 层特征列表
+        return fpn_feats
     
     def forward_train(self, imgs, boxes_2d, cam_intrinsics, cam_extrinsics, temporal_depth_prior=None):
         """
@@ -166,16 +164,19 @@ class TDRDetector(nn.Module):
         # 将多视角图像合并为 [B * N_cam, 3, H, W]
         imgs_reshaped = imgs.view(-1, 3, H, W)
         
-        # 提取特征
-        feat = self.extract_feat(imgs_reshaped)  # [B * N_cam, C, H_feat, W_feat]
+        # 提取多尺度特征
+        mlvl_feats = self.extract_feat(imgs_reshaped)  # 返回的是 list
         
-        # 将特征还原为 [B, N_cam, C, H_feat, W_feat]
-        C, H_feat, W_feat = feat.shape[1], feat.shape[2], feat.shape[3]
-        feat_reshaped = feat.view(B, N_cam, C, H_feat, W_feat)
+        # 遍历每层特征，分别进行维度重塑
+        mlvl_feats_reshaped = []
+        for feat in mlvl_feats:
+            C, H_feat, W_feat = feat.shape[1], feat.shape[2], feat.shape[3]
+            feat_reshaped = feat.view(B, N_cam, C, H_feat, W_feat)
+            mlvl_feats_reshaped.append(feat_reshaped)
         
-        # 送入 TDRHead
+        # 送入 TDRHead（现在传入的是特征列表）
         cls_scores, bbox_preds = self.pts_bbox_head(
-            feat_reshaped, boxes_2d, cam_intrinsics, cam_extrinsics, temporal_depth_prior
+            mlvl_feats_reshaped, boxes_2d, cam_intrinsics, cam_extrinsics, temporal_depth_prior
         )
         
         return cls_scores, bbox_preds

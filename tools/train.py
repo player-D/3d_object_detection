@@ -11,6 +11,7 @@ from tqdm import tqdm
 import torch
 import torch.optim as optim
 from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.utils.tensorboard import SummaryWriter
 
 # 把项目根目录加入搜索路径
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -65,8 +66,11 @@ def main():
     
     csv_path = os.path.join(log_dir, "train_log.csv")
     with open(csv_path, 'w', newline='') as f:
-        writer = csv.writer(f)
-        writer.writerow(['Epoch', 'lr', 'Loss_Total', 'Loss_Cls', 'Loss_Reg', 'Matched_Q', 'Pos_Acc', 'XYZ_Err_m'])
+        csv_writer = csv.writer(f)
+        csv_writer.writerow(['Epoch', 'lr', 'Loss_Total', 'Loss_Cls', 'Loss_Reg', 'Matched_Q', 'Pos_Acc', 'XYZ_Err_m'])
+    
+    # 初始化 TensorBoard
+    writer = SummaryWriter(log_dir=log_dir)
     
     import torch.multiprocessing as mp
     
@@ -132,100 +136,128 @@ def main():
         if 'scheduler_state_dict' in checkpoint: scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
         logger.info(f"==> 成功从 checkpoint 恢复训练")
 
-    for epoch in range(start_epoch, args.epochs + 1):
-        
-        # Warmup + Scheduler
-        if epoch <= warmup_epochs:
-            current_lr = args.lr * (epoch / warmup_epochs)
-            for pg in optimizer.param_groups:
-                pg['lr'] = current_lr
-        else:
-            scheduler.step()
-            current_lr = scheduler.get_last_lr()[0]
+    best_xyz_err = float('inf')  # 记录最优指标
+    try:
+        for epoch in range(start_epoch, args.epochs + 1):
+            
+            # Warmup + Scheduler
+            if epoch <= warmup_epochs:
+                current_lr = args.lr * (epoch / warmup_epochs)
+                for pg in optimizer.param_groups:
+                    pg['lr'] = current_lr
+            else:
+                scheduler.step()
+                current_lr = scheduler.get_last_lr()[0]
 
-        model.train()
-        total_loss, total_cls_loss, total_reg_loss = 0.0, 0.0, 0.0
-        total_matched, total_pos_acc, total_xyz_err = 0.0, 0.0, 0.0
-        steps = len(dataloader)
-        
-        pbar = tqdm(dataloader, desc=f"Epoch {epoch}/{args.epochs}", mininterval=0.5, dynamic_ncols=True)
-        for batch_idx, (images, boxes_2d, cam_intrinsics, cam_extrinsics, gt_bboxes, gt_labels) in enumerate(pbar):
+            model.train()
+            total_loss, total_cls_loss, total_reg_loss = 0.0, 0.0, 0.0
+            total_matched, total_pos_acc, total_xyz_err = 0.0, 0.0, 0.0
+            steps = len(dataloader)
             
-            # ================== 【双保险：防空批次暴毙】 ==================
-            if images.numel() == 0 or images.dim() == 1:   # 更鲁棒的写法
-                tqdm.write("⚠️  遭遇全损空 Batch，已安全跳过！")
-                continue
-            # ============================================================
-            
-            images = images.to(device).float()
-            boxes_2d = boxes_2d.to(device).float()
-            cam_intrinsics = cam_intrinsics.to(device).float()
-            cam_extrinsics = cam_extrinsics.to(device).float()
-            gt_labels = [label.to(device) for label in gt_labels]
-            gt_bboxes = [bbox.to(device) for bbox in gt_bboxes]
-            
-            optimizer.zero_grad()
-            
-            # 全精度前向传播
-            cls_scores, bbox_preds = model(images, boxes_2d, cam_intrinsics, cam_extrinsics, temporal_depth_prior=None)
-            losses = criterion(cls_scores, bbox_preds, gt_labels, gt_bboxes)
-            loss_cls = losses['loss_cls']
-            loss_reg = losses['loss_bbox']
-            loss = loss_cls + loss_reg
-            
-            # 防爆保险丝
-            if torch.isnan(loss) or torch.isinf(loss):
-                tqdm.write(f"⚠️ 发现 NaN Loss，主动丢弃当前有毒 Batch！")
-                optimizer.zero_grad()
-                continue
+            pbar = tqdm(dataloader, desc=f"Epoch {epoch}/{args.epochs}", mininterval=0.5, dynamic_ncols=True)
+            for batch_idx, (images, boxes_2d, cam_intrinsics, cam_extrinsics, gt_bboxes, gt_labels) in enumerate(pbar):
                 
-            loss.backward()
+                # ================== 【双保险：防空批次暴毙】 ==================
+                if images.numel() == 0 or images.dim() == 1:   # 更鲁棒的写法
+                    tqdm.write("⚠️  遭遇全损空 Batch，已安全跳过！")
+                    continue
+                # ============================================================
+                
+                images = images.to(device).float()
+                boxes_2d = boxes_2d.to(device).float()
+                cam_intrinsics = cam_intrinsics.to(device).float()
+                cam_extrinsics = cam_extrinsics.to(device).float()
+                gt_labels = [label.to(device) for label in gt_labels]
+                gt_bboxes = [bbox.to(device) for bbox in gt_bboxes]
+                
+                optimizer.zero_grad()
+                
+                # 全精度前向传播
+                cls_scores, bbox_preds = model(images, boxes_2d, cam_intrinsics, cam_extrinsics, temporal_depth_prior=None)
+                losses = criterion(cls_scores, bbox_preds, gt_labels, gt_bboxes)
+                loss_cls = losses['loss_cls']
+                loss_reg = losses['loss_bbox']
+                loss = loss_cls + loss_reg
+                
+                # 防爆保险丝
+                if torch.isnan(loss) or torch.isinf(loss):
+                    tqdm.write(f"⚠️ 发现 NaN Loss，主动丢弃当前有毒 Batch！")
+                    optimizer.zero_grad()
+                    continue
+                    
+                loss.backward()
+                
+                # 【修复】：先清 NaN，再裁剪梯度！
+                for param in model.parameters():
+                    if param.grad is not None:
+                        param.grad = torch.nan_to_num(param.grad, nan=0.0, posinf=0.0, neginf=0.0)
+                
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=4.0)
+                optimizer.step()
+                
+                matched_q = losses.get('matched_queries', 0)
+                pos_acc = losses.get('pos_acc', 0)
+                xyz_err = losses.get('xyz_err_m', 0)
+                
+                total_loss += loss.item()
+                total_cls_loss += loss_cls.item()
+                total_reg_loss += loss_reg.item()
+                total_matched += matched_q
+                total_pos_acc += pos_acc
+                total_xyz_err += xyz_err
+                
+                pbar.set_postfix({
+                    'LR': f'{current_lr:.6f}',
+                    'Loss': f'{loss.item():.2f}',
+                    'Match': f'{matched_q}',
+                    'Acc': f'{pos_acc*100:.1f}%',
+                    'Err': f'{xyz_err:.2f}m'
+                })
             
-            # 【修复】：先清 NaN，再裁剪梯度！
-            for param in model.parameters():
-                if param.grad is not None:
-                    param.grad = torch.nan_to_num(param.grad, nan=0.0, posinf=0.0, neginf=0.0)
+            avg_loss = total_loss / steps
+            avg_matched = total_matched / steps
+            avg_acc = total_pos_acc / steps
+            avg_err = total_xyz_err / steps
             
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=4.0)
-            optimizer.step()
+            with open(csv_path, 'a', newline='') as f:
+                csv_writer = csv.writer(f)
+                csv_writer.writerow([epoch, current_lr, avg_loss, total_cls_loss/steps, total_reg_loss/steps, avg_matched, avg_acc, avg_err])
             
-            matched_q = losses.get('matched_queries', 0)
-            pos_acc = losses.get('pos_acc', 0)
-            xyz_err = losses.get('xyz_err_m', 0)
+            logger.info(f"==> Epoch {epoch}: LR={current_lr:.6f}, Loss={avg_loss:.2f}, Match={avg_matched:.1f}, Acc={avg_acc*100:.1f}%, XYZ_Err={avg_err:.2f}m")
             
-            total_loss += loss.item()
-            total_cls_loss += loss_cls.item()
-            total_reg_loss += loss_reg.item()
-            total_matched += matched_q
-            total_pos_acc += pos_acc
-            total_xyz_err += xyz_err
+            # 在每个 epoch 结束打印日志之后，写入 TensorBoard
+            writer.add_scalar('Loss/Total', avg_loss, epoch)
+            writer.add_scalar('Loss/Cls', total_cls_loss/steps, epoch)
+            writer.add_scalar('Loss/Reg', total_reg_loss/steps, epoch)
+            writer.add_scalar('Metrics/Pos_Acc', avg_acc, epoch)
+            writer.add_scalar('Metrics/XYZ_Err', avg_err, epoch)
             
-            pbar.set_postfix({
-                'LR': f'{current_lr:.6f}',
-                'Loss': f'{loss.item():.2f}',
-                'Match': f'{matched_q}',
-                'Acc': f'{pos_acc*100:.1f}%',
-                'Err': f'{xyz_err:.2f}m'
-            })
-        
-        avg_loss = total_loss / steps
-        avg_matched = total_matched / steps
-        avg_acc = total_pos_acc / steps
-        avg_err = total_xyz_err / steps
-        
-        with open(csv_path, 'a', newline='') as f:
-            csv.writer(f).writerow([epoch, current_lr, avg_loss, total_cls_loss/steps, total_reg_loss/steps, avg_matched, avg_acc, avg_err])
-        
-        logger.info(f"==> Epoch {epoch}: LR={current_lr:.6f}, Loss={avg_loss:.2f}, Match={avg_matched:.1f}, Acc={avg_acc*100:.1f}%, XYZ_Err={avg_err:.2f}m")
-        
-        model_save_path = os.path.join(save_dir, f'tdr_qaf_epoch_{epoch}.pth')
-        torch.save({
-            'epoch': epoch,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'scheduler_state_dict': scheduler.state_dict()
-        }, model_save_path)
-        logger.info(f"==> 模型已保存至: {model_save_path}")
+            # 【自动保存最优权重】
+            if avg_err < best_xyz_err:
+                best_xyz_err = avg_err
+                best_model_path = os.path.join(save_dir, 'best_model.pth')
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict()
+                }, best_model_path)
+                logger.info(f"🏆 发现更优模型！已保存至 {best_model_path}")
+            
+            model_save_path = os.path.join(save_dir, f'tdr_qaf_epoch_{epoch}.pth')
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict()
+            }, model_save_path)
+            logger.info(f"==> 模型已保存至: {model_save_path}")
+    except KeyboardInterrupt:
+        logger.info("\n⚠️ 训练被手动中断 (Ctrl+C)，正在安全退出...")
+    except Exception as e:
+        logger.error(f"❌ 训练异常: {e}")
+    finally:
+        writer.close()
 
 if __name__ == '__main__':
     main()

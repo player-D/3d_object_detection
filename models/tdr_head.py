@@ -27,10 +27,10 @@ class CrossAttention(nn.Module):
         # 输出投影
         self.out_proj = nn.Linear(embed_dims, embed_dims)
 
-    def forward(self, query, reference_points, key_padding_mask, cam_intrinsics, cam_extrinsics, img_feats):
+    def forward(self, query, reference_points, key_padding_mask, cam_intrinsics, cam_extrinsics, mlvl_feats):
         B, Num_Query, _ = query.shape
-        N_cam = img_feats.shape[1]
-        H, W = img_feats.shape[3], img_feats.shape[4]
+        N_cam = mlvl_feats[0].shape[1]
+        H, W = mlvl_feats[0].shape[3], mlvl_feats[0].shape[4]
 
         # ================== 1. 【核心 Bug 修复】反归一化 ==================
         # 必须在乘外参矩阵前，将 [0, 1] 的坐标转回真实的物理米数 (-51.2 ~ 51.2)
@@ -64,12 +64,12 @@ class CrossAttention(nn.Module):
             
             # ================== 【核心防护】提取深度，处理背后点和极近点 ==================
             depth = points_cam_hom[..., 2:3]
-            depth = torch.nan_to_num(depth, nan=1.0, posinf=100.0, neginf=0.1)
+            depth = torch.nan_to_num(depth, nan=10.0, posinf=100.0, neginf=-100.0)
             
-            # 相机背后或极近的点标记为无效 (Z < 0.1)
-            invalid_mask = (depth.squeeze(-1) < 0.1)  # [B, Num_Query]
-            # 最小 0.1 米，彻底防止透视投影时的除零爆炸
-            depth_safe = torch.clamp(depth, min=0.1)
+            # 【关键加强】把无效深度阈值提高到 1.5 米
+            invalid_mask = (depth.squeeze(-1) < 1.5)  # [B, Num_Query]
+            # 最小 1.5 米，彻底防止透视投影时的除零爆炸
+            depth_safe = torch.clamp(depth, min=1.5)
             
             # 归一化到相机平面 (X/Z, Y/Z, 1)
             points_cam = points_cam_hom[..., :3] / depth_safe
@@ -83,41 +83,45 @@ class CrossAttention(nn.Module):
             
             # 由于 points_cam 的 Z 已经是 1，此时 points_img_hom 的 XY 即为像素坐标
             points_img = points_img_hom[..., :2]
+            # 【最后一道保险】强力像素坐标裁剪
+            points_img = torch.clamp(points_img, -3000.0, 3000.0)
             
-            # ================== 特征图归一化与裁剪 ==================
-            H_feat = img_feats.shape[3]
-            W_feat = img_feats.shape[4]
-            orig_W = 800.0
-            orig_H = 448.0
-            scale_x = W_feat / orig_W
-            scale_y = H_feat / orig_H
+            orig_W, orig_H = 800.0, 448.0
             
-            feat_x = points_img[..., 0] * scale_x
-            feat_y = points_img[..., 1] * scale_y
+            cam_sampled_levels = []
+            # 遍历多尺度特征
+            for feat_level in mlvl_feats:
+                curr_feat = feat_level[:, cam_idx]  # [B, C, H_feat, W_feat]
+                H_feat, W_feat = curr_feat.shape[2], curr_feat.shape[3]
+                
+                scale_x = W_feat / orig_W
+                scale_y = H_feat / orig_H
+                feat_x = points_img[..., 0] * scale_x
+                feat_y = points_img[..., 1] * scale_y
+                
+                # 归一化到 [-1, 1] 供 grid_sample 使用
+                grid_x = torch.clamp((feat_x / (W_feat - 1.0)) * 2.0 - 1.0, -10.0, 10.0)
+                grid_y = torch.clamp((feat_y / (H_feat - 1.0)) * 2.0 - 1.0, -10.0, 10.0)
+                grid = torch.stack([grid_x, grid_y], dim=-1)  # [B, Num_Query, 2]
+                
+                # 踢出无效点
+                grid[invalid_mask] = -100.0
+                grid = grid.unsqueeze(2)  # [B, Num_Query, 1, 2]
+                
+                # 采样当前层特征
+                sampled = F.grid_sample(
+                    curr_feat, grid,
+                    mode='bilinear', padding_mode='zeros', align_corners=True
+                ).squeeze(-1).transpose(1, 2)
+                
+                sampled = torch.nan_to_num(sampled, nan=0.0)
+                cam_sampled_levels.append(sampled)
             
-            # 归一化到 [-1, 1] 供 grid_sample 使用
-            grid_x = torch.clamp((feat_x / (W_feat - 1.0)) * 2.0 - 1.0, -10.0, 10.0)
-            grid_y = torch.clamp((feat_y / (H_feat - 1.0)) * 2.0 - 1.0, -10.0, 10.0)
-            grid = torch.stack([grid_x, grid_y], dim=-1)  # [B, Num_Query, 2]
-            
-            # 将无效点（相机背后）的采样坐标设为 -100，彻底防止污染
-            grid[invalid_mask] = -100.0
-            grid = grid.unsqueeze(2)  # [B, Num_Query, 1, 2]
-            
-            # [强诊断打印]
-            valid_ratio = (~invalid_mask).float().mean()
-            print(f"[CrossAttn Debug] Cam {cam_idx} | feat_shape: {img_feats[:, cam_idx].shape} | " 
-                  f"points_img X range: {points_img[..., 0].min():.1f}~{points_img[..., 0].max():.1f} | " 
-                  f"valid ratio: {valid_ratio:.3f}")
-
-            sampled = F.grid_sample(
-                img_feats[:, cam_idx], grid,
-                mode='bilinear', padding_mode='zeros', align_corners=True
-            ).squeeze(-1).transpose(1, 2)
-            
-            sampled = torch.nan_to_num(sampled, nan=0.0)
-            sampled = self.v_proj(sampled)
-            sampled_feats_list.append(sampled)
+            # 多尺度特征融合：对 4 个尺度的特征取平均
+            multi_scale_feat = torch.stack(cam_sampled_levels, dim=1).mean(dim=1)
+            # 通过 V 投影
+            multi_scale_feat = self.v_proj(multi_scale_feat)
+            sampled_feats_list.append(multi_scale_feat)
 
         # ================== 4. 【多视角特征聚合】改为 max ==================
         # 使用 max 代替 sum，完美提取对应相机的有效特征，过滤其它相机的 0
@@ -149,7 +153,7 @@ class DecoderLayer(nn.Module):
         self.norm2 = nn.LayerNorm(embed_dims)
         self.norm3 = nn.LayerNorm(embed_dims)
 
-    def forward(self, query, reference_points, key_padding_mask, cam_intrinsics, cam_extrinsics, img_feats):
+    def forward(self, query, reference_points, key_padding_mask, cam_intrinsics, cam_extrinsics, mlvl_feats):
         # 自注意力（使用 padding mask 屏蔽幽灵 Query）
         q = self.norm1(query)
         self_attn_output, _ = self.self_attn(q, q, q, key_padding_mask=key_padding_mask)
@@ -157,7 +161,7 @@ class DecoderLayer(nn.Module):
 
         # 交叉注意力
         q = self.norm2(query)
-        cross_attn_output = self.cross_attn(q, reference_points, key_padding_mask, cam_intrinsics, cam_extrinsics, img_feats)
+        cross_attn_output = self.cross_attn(q, reference_points, key_padding_mask, cam_intrinsics, cam_extrinsics, mlvl_feats)
         query = query + cross_attn_output
 
         # FFN
@@ -224,7 +228,7 @@ class TDRHead(nn.Module):
 
     def forward(self, mlvl_feats, boxes_2d, cam_intrinsics, cam_extrinsics, temporal_depth_prior=None):
         """
-        mlvl_feats: [B, N_cam, C, H, W]
+        mlvl_feats: list of [B, N_cam, C, H, W]
         """
         # 1. Lifting 生成参考点和 padding mask
         reference_points, key_padding_mask = self.lifting(
