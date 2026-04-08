@@ -49,9 +49,12 @@
               <el-input-number 
                 v-model="sampleIndex" 
                 :min="0" 
-                :max="403" 
+                :max="datasetSize - 1" 
                 class="custom-input"
               />
+              <div style="font-size: 12px; color: #909399; margin-top: 5px;">
+                数据集大小: {{ datasetSize }} 个样本
+              </div>
             </el-form-item>
             
             <el-form-item>
@@ -217,13 +220,15 @@ const deviceType = ref('CPU')
 const gtTotal = ref(0)
 const predDetails = ref({})
 const activeNames = ref(['1'])
+const datasetSize = ref(50)  // 默认值，会从后端更新
 
 // 检查后端状态
 const checkBackendStatus = async () => {
   try {
-    const response = await axios.get('http://127.0.0.1:8000/api/health')
+    const response = await axios.get('http://127.0.0.1:8000/health')
     backendStatus.value = true
     deviceType.value = response.data.device || 'CPU'
+    datasetSize.value = response.data.dataset_size || 50
   } catch (error) {
     backendStatus.value = false
   }
@@ -429,7 +434,8 @@ onUnmounted(() => {
 .image-container {
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 30px;
+  padding: 10px;
 }
 
 .image-card {

@@ -259,7 +259,11 @@ class TDRHead(nn.Module):
         query = self.query_embed(reference_points)
 
         # 4. Decoder 层：逐层 refinement reference_points 和 重新注入 RoPE
+        print(f"Decoder layers length: {len(self.decoder_layers)}")
+        print(f"Refine branches length: {len(self.refine_branches)}")
+        
         for layer_idx, layer in enumerate(self.decoder_layers):
+            print(f"Processing layer {layer_idx}")
             # 【核心架构升级 1】：每层都用最新的 reference_points 重新做 RoPE 旋转
             pos_sin, pos_cos = self.m_rope(reference_points)
             query_rot = query * pos_cos + rotate_half(query) * pos_sin
@@ -275,7 +279,8 @@ class TDRHead(nn.Module):
             )
 
             # 【核心架构升级 2】：最后一层不再更新 reference_points
-            if layer_idx < len(self.decoder_layers) - 1:
+            if layer_idx < len(self.decoder_layers) - 1 and layer_idx < len(self.refine_branches):
+                print(f"Updating reference points at layer {layer_idx}")
                 # 预测偏移量
                 delta = self.refine_branches[layer_idx](query)
 

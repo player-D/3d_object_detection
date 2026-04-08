@@ -10,9 +10,11 @@ from PIL import Image
 
 
 class NuScenesDataset(Dataset):
-    def __init__(self, root="./dataset", debug_mode=False):
+    def __init__(self, root="./dataset", debug_mode=False, max_samples=None):
         self.root = root
         self.debug_mode = debug_mode
+        self.max_samples = max_samples  # 限制样本数量，用于本地快速验证
+        self.sample_indices = None  # 用于存储指定的样本索引
 
         if not debug_mode:
             self.nusc = NuScenes(version='v1.0-mini', dataroot=root, verbose=True)
@@ -51,13 +53,52 @@ class NuScenesDataset(Dataset):
         self.samples = [{} for _ in range(100)]
 
     def __len__(self):
-        return min(50, len(self.samples))
+        if self.sample_indices is not None:
+            return len(self.sample_indices)
+        if self.max_samples is not None:
+            return min(self.max_samples, len(self.samples))
+        return len(self.samples)
+
+    def get_sample_indices(self):
+        """获取当前使用的样本索引列表"""
+        if self.max_samples is not None:
+            return list(range(min(len(self.samples), self.max_samples)))
+        return list(range(len(self.samples)))
+
+    def save_sample_indices(self, path):
+        """保存当前使用的样本索引到文件"""
+        import json
+        indices = self.get_sample_indices()
+        sample_tokens = [self.samples[i]['token'] for i in indices]
+        data = {
+            'indices': indices,
+            'tokens': sample_tokens,
+            'total_samples': len(self.samples),
+            'used_samples': len(indices)
+        }
+        with open(path, 'w') as f:
+            json.dump(data, f, indent=2)
+        print(f'样本索引已保存到: {path}')
+
+    @classmethod
+    def load_sample_indices(cls, path):
+        """从文件加载样本索引"""
+        import json
+        with open(path, 'r') as f:
+            data = json.load(f)
+        return data
 
     def __getitem__(self, index):
-        if self.debug_mode:
-            return self._get_fake_item(index)
+        # 如果指定了样本索引，使用映射
+        if self.sample_indices is not None:
+            actual_index = self.sample_indices[index]
         else:
-            return self._get_real_item(index)
+            actual_index = index
+
+        if self.debug_mode:
+            return self._get_fake_item(actual_index)
+        else:
+            return self._get_real_item(actual_index)
 
     def _get_fake_item(self, index):
         images = torch.randn(6, 3, 256, 704)
@@ -267,11 +308,15 @@ class NuScenesDataset(Dataset):
         min_x, min_y, max_x, max_y = box_2d
         area = (max_x - min_x) * (max_y - min_y)
         # 新增：太小（小于4）或太大（大于画面的80%）的异常框直接抛弃
-        if area < 4 or area > img_w * img_h * 0.8:   
+        if area < 4 or area > img_w * img_h * 0.8:
             return False
         return not (max_x < 0 or min_x > img_w or max_y < 0 or min_y > img_h)
 
     def _pad_boxes_2d(self, boxes_2d, max_boxes):
+        # 如果没有有效框，返回全0张量但标记为无效
+        if len(boxes_2d) == 0:
+            return torch.zeros(max_boxes, 4, dtype=torch.float32)
+
         padded = []
         for box in boxes_2d[:max_boxes]:
             padded.append(box)

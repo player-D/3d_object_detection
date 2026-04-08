@@ -35,17 +35,19 @@ async def lifespan(app: FastAPI):
     
     # 加载模型
     try:
-        # 使用 ../ 返回项目根目录
-        model = load_model(device, checkpoint_path='../saved_models/run_20260320_113250/tdr_qaf_epoch_10.pth')
+        # 使用相对路径，用户需要确保权重文件存在
+        model = load_model(device, checkpoint_path='./saved_models/best_model.pth')
     except Exception as e:
         print(f"加载模型失败: {e}")
+        print("提示：请确保 ./saved_models/best_model.pth 存在，或修改main.py中的checkpoint路径")
         sys.exit(1)
     
     # 加载数据集
     try:
         dataset = NuScenesDataset(
-            root='../dataset/nuscenes',
-            debug_mode=False
+            root='./dataset',
+            debug_mode=False,
+            max_samples=50  # 本地快速验证限制为50个样本
         )
         print(f"数据集加载成功，共 {len(dataset)} 个样本")
     except Exception as e:
@@ -208,10 +210,11 @@ async def root():
 async def health_check():
     model = app.state.model
     dataset = app.state.dataset
+    device = app.state.device
     if model is not None and dataset is not None:
-        return {"status": "healthy", "model_loaded": True, "dataset_size": len(dataset)}
+        return {"status": "healthy", "model_loaded": True, "dataset_size": len(dataset), "device": str(device)}
     else:
-        return {"status": "unhealthy", "model_loaded": model is not None, "dataset_loaded": dataset is not None}
+        return {"status": "unhealthy", "model_loaded": model is not None, "dataset_loaded": dataset is not None, "device": str(device)}
 
 # API 健康检查（前端调用）
 @app.get("/api/health")

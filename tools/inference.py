@@ -473,12 +473,24 @@ def project_3d_box_to_image(box, nusc, sample_token, cam_name, K, is_global=True
     return points_2d, depth, box_cam
 
 def merge_6_cams(path_dict):
-    # 横向拼接前排
-    front_combined = cv2.hconcat([path_dict["CAM_FRONT_LEFT"], path_dict["CAM_FRONT"], path_dict["CAM_FRONT_RIGHT"]])
-    # 横向拼接后排（调整为左、中、右顺序，并废弃 flip 翻转防止文字镜像）
-    back_combined = cv2.hconcat([path_dict["CAM_BACK_LEFT"], path_dict["CAM_BACK"], path_dict["CAM_BACK_RIGHT"]])
-    # 上下拼接
-    img_combined = cv2.vconcat([front_combined, back_combined])
+    # 创建间距
+    gap = 10
+    gap_color = (50, 50, 50)  # 深灰色间距
+
+    # 获取单个图像尺寸
+    h, w = path_dict["CAM_FRONT"].shape[:2]
+
+    # 横向拼接前排（添加间距）
+    gap_h = np.ones((h, gap, 3), dtype=np.uint8) * gap_color
+    front_combined = cv2.hconcat([path_dict["CAM_FRONT_LEFT"], gap_h, path_dict["CAM_FRONT"], gap_h, path_dict["CAM_FRONT_RIGHT"]])
+
+    # 横向拼接后排（添加间距）
+    back_combined = cv2.hconcat([path_dict["CAM_BACK_LEFT"], gap_h, path_dict["CAM_BACK"], gap_h, path_dict["CAM_BACK_RIGHT"]])
+
+    # 上下拼接（添加间距）
+    gap_v = np.ones((gap, front_combined.shape[1], 3), dtype=np.uint8) * gap_color
+    img_combined = cv2.vconcat([front_combined, gap_v, back_combined])
+
     return img_combined
 
 def visualize(images, cam_intrinsics, gt_bboxes, gt_labels, pred_scores, pred_labels, pred_bboxes, sample_token, output_dir, nusc):
@@ -625,23 +637,47 @@ def visualize(images, cam_intrinsics, gt_bboxes, gt_labels, pred_scores, pred_la
         'gt_details': gt_class_stats
     }
     
-    # === 纯视觉 BEV 绘制 (白底+网格+红绿框) ===
+    # === 自动驾驶视角 BEV 绘制 (深色背景+方向指示+距离标注) ===
     import math
     bev_size = 800
     pixels_per_meter = 10
-    bev_img = np.ones((bev_size, bev_size, 3), dtype=np.uint8) * 255 # 纯白底
+    # 深色背景，符合自动驾驶界面风格
+    bev_img = np.ones((bev_size, bev_size, 3), dtype=np.uint8) * 30  # 深灰色背景
     center_px = bev_size // 2
-    
-    # 1. 画浅灰色十字网格
-    for i in range(0, bev_size, 100):
-        cv2.line(bev_img, (i, 0), (i, bev_size), (230, 230, 230), 1)
-        cv2.line(bev_img, (0, i), (bev_size, i), (230, 230, 230), 1)
-    
-    # 2. 画中心自车 (深灰色)
-    cv2.rectangle(bev_img, (center_px - 9, center_px - 20), (center_px + 9, center_px + 20), (100, 100, 100), -1)
+
+    # 1. 画网格线（更细，颜色更淡）
+    for i in range(0, bev_size, 50):
+        cv2.line(bev_img, (i, 0), (i, bev_size), (50, 50, 50), 1)
+        cv2.line(bev_img, (0, i), (bev_size, i), (50, 50, 50), 1)
+
+    # 2. 画方向指示（箭头）
+    # 前方（向上）
+    cv2.arrowedLine(bev_img, (center_px, center_px + 30), (center_px, center_px - 30), (0, 200, 255), 3, tipLength=0.3)
+    # 后方（向下）
+    cv2.arrowedLine(bev_img, (center_px, center_px - 30), (center_px, center_px + 30), (0, 200, 255), 3, tipLength=0.3)
+    # 左方（向左）
+    cv2.arrowedLine(bev_img, (center_px + 30, center_px), (center_px - 30, center_px), (0, 200, 255), 3, tipLength=0.3)
+    # 右方（向右）
+    cv2.arrowedLine(bev_img, (center_px - 30, center_px), (center_px + 30, center_px), (0, 200, 255), 3, tipLength=0.3)
+
+    # 3. 画距离刻度（每10米一个刻度）
+    for dist in range(10, 51, 10):
+        # 上方刻度
+        y_pos = center_px - dist * pixels_per_meter
+        if y_pos > 0:
+            cv2.line(bev_img, (center_px - 10, y_pos), (center_px + 10, y_pos), (0, 200, 255), 2)
+            cv2.putText(bev_img, f'{dist}m', (center_px + 15, y_pos + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1)
+
+    # 4. 画中心自车（带方向指示的车形）
+    # 车身
+    cv2.rectangle(bev_img, (center_px - 9, center_px - 20), (center_px + 9, center_px + 20), (0, 255, 255), -1)
+    # 车头指示（前方用亮色）
+    cv2.rectangle(bev_img, (center_px - 7, center_px - 18), (center_px + 7, center_px - 20), (0, 200, 0), -1)
+    # 添加文字标注
+    cv2.putText(bev_img, 'EGO', (center_px - 12, center_px + 35), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
     
     # 画框内部函数
-    def draw_bev_box(box_ego, color):
+    def draw_bev_box(box_ego, color, label=None):
         x, y, z = box_ego.center
         w, l, h = box_ego.wlh
         yaw = box_ego.orientation.yaw_pitch_roll[0]
@@ -649,14 +685,33 @@ def visualize(images, cam_intrinsics, gt_bboxes, gt_labels, pred_scores, pred_la
         corners = np.array([[-w/2, l/2], [w/2, l/2], [w/2, -l/2], [-w/2, -l/2]])
         rot_mat = np.array([[math.cos(-yaw), -math.sin(-yaw)], [math.sin(-yaw), math.cos(-yaw)]])
         corners_rot = corners.dot(rot_mat.T)
-        
+
         corners_img = np.zeros((4, 2), dtype=np.int32)
         for j in range(4):
             # 坐标转换：Ego(X右,Y前) -> Image(X右,Y下)
             img_x = int(center_px + (x + corners_rot[j, 0]) * pixels_per_meter)
             img_y = int(center_px - (y + corners_rot[j, 1]) * pixels_per_meter)
             corners_img[j] = [img_x, img_y]
+
+        # 绘制边框
         cv2.polylines(bev_img, [corners_img], isClosed=True, color=color, thickness=2)
+
+        # 计算距离
+        distance = math.sqrt(x**2 + y**2)
+
+        # 在框上方添加距离标注
+        center_x_img = int(center_px + x * pixels_per_meter)
+        center_y_img = int(center_px - y * pixels_per_meter)
+
+        # 距离标注
+        dist_text = f'{distance:.1f}m'
+        cv2.putText(bev_img, dist_text, (center_x_img - 20, center_y_img - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+
+        # 如果有标签，绘制标签
+        if label:
+            cv2.putText(bev_img, label, (center_x_img - 20, center_y_img + 15),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
 
     # 获取 ego_pose (用于将 GT 转到自车坐标系)
     sample = nusc.get('sample', sample_token)
@@ -672,16 +727,28 @@ def visualize(images, cam_intrinsics, gt_bboxes, gt_labels, pred_scores, pred_la
         box_ego = copy.deepcopy(box)
         box_ego.translate([-px for px in ego_pose['translation']])
         box_ego.rotate(Quaternion(ego_pose['rotation']).inverse)
-        draw_bev_box(box_ego, (0, 255, 0)) # BGR: Green
-        
+
+        # 获取类别名称
+        annotation = nusc.get('sample_annotation', ann_token)
+        cat_name = annotation['category_name']
+        # 简化类别名
+        cat_name = cat_name.split('.')[-1] if '.' in cat_name else cat_name
+
+        draw_bev_box(box_ego, (0, 255, 0), label=cat_name)  # BGR: Green
+
     # 4. 画 Pred 红框
     if len(pred_bboxes) > 0:
-        for bbox in pred_bboxes:
+        for i, bbox in enumerate(pred_bboxes):
             bbox_np = bbox.detach().cpu().numpy()
             box = build_box_from_vec(bbox_np)
             if box is None:
                 continue
-            draw_bev_box(box, (0, 0, 255)) # BGR: Red
+
+            # 获取预测标签
+            label_idx = pred_labels[i].item()
+            label_name = CLASS_NAMES.get(label_idx, str(label_idx))
+
+            draw_bev_box(box, (0, 0, 255), label=label_name)  # BGR: Red
             
     # 保存结果（如果指定了输出目录）
     if output_dir is not None:
@@ -730,6 +797,7 @@ def main():
     parser.add_argument('--confidence', type=float, default=0.05, help='Confidence threshold for filtering predictions')
     parser.add_argument('--topk', type=int, default=50, help='Maximum number of predictions to keep')
     parser.add_argument('--overfit', action='store_true', help='是否为本地过拟合模式的权重' )
+    parser.add_argument('--max_samples', type=int, default=50, help='Max samples to use for inference (default: 50)')
     args = parser.parse_args()
     
     # 1. 环境准备
@@ -752,9 +820,18 @@ def main():
     try:
         dataset = NuScenesDataset(
             root='./dataset',
-            debug_mode=False
+            debug_mode=False,
+            max_samples=args.max_samples  # 限制样本数量
         )
         print(f'数据集加载成功，共 {len(dataset)} 个样本')
+
+        # 如果指定了加载样本索引
+        if args.load_indices:
+            indices_data = NuScenesDataset.load_sample_indices(args.load_indices)
+            dataset.set_sample_indices(indices_data['indices'])
+            print(f'已加载训练样本索引，inference将只在训练样本上测试，共 {len(indices_data["indices"])} 个样本')
+        else:
+            print('未加载训练样本索引，inference将在随机样本上测试')
     except Exception as e:
         print(f'加载数据集失败：{e}')
         return

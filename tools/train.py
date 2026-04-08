@@ -40,7 +40,8 @@ def main():
     parser.add_argument('--pretrained', type=str, default='', help='Pre-trained weight .pth file path')
     parser.add_argument('--resume', type=str, default='', help='Resume training from checkpoint .pth file path')
     parser.add_argument('--output_dir', type=str, default='output', help='Output directory')
-    parser.add_argument('--overfit', action='store_true', help='开启本地过拟合测试模式（简化模型）' )
+    parser.add_argument('--max_samples', type=int, default=None, help='限制样本数量（用于快速验证）')
+    parser.add_argument('--load_indices', type=str, default=None, help='加载训练时使用的样本索引文件路径')
     args = parser.parse_args()
     
     current_time = datetime.datetime.now().strftime("%m_%d_%H-%M")
@@ -75,11 +76,22 @@ def main():
     import torch.multiprocessing as mp
     
     try:
-        dataset = NuScenesDataset(root=args.data_root, debug_mode=False)
+        dataset = NuScenesDataset(root=args.data_root, debug_mode=False, max_samples=args.max_samples)
         logger.info(f"==> 数据集加载成功，共 {len(dataset)} 个样本")
     except Exception as e:
         logger.error(f"==> 加载数据集失败: {e}")
         return
+
+    # 如果指定了加载样本索引
+    if args.load_indices:
+        indices_data = NuScenesDataset.load_sample_indices(args.load_indices)
+        dataset.set_sample_indices(indices_data['indices'])
+        logger.info(f'已加载训练样本索引，共 {len(indices_data["indices"])} 个样本')
+
+    # 保存训练使用的样本索引
+    sample_indices_path = os.path.join(save_dir, 'sample_indices.json')
+    dataset.save_sample_indices(sample_indices_path)
+    logger.info(f'训练样本索引已保存到: {sample_indices_path}')
     
     dataloader = torch.utils.data.DataLoader(
         dataset,
@@ -93,19 +105,13 @@ def main():
         drop_last=True,
         multiprocessing_context=mp.get_context('spawn') if (torch.cuda.is_available() and args.num_workers > 0) else None
     )
-    
-    if args.overfit:
-        logger.info("==> 🚀 开启本地过拟合模式：模型极简，严厉过滤，强化回归" )
-        decoder_layers = 2
-        depth_dense = 24
-        max_q = 200
-        cost_bbox_val = 8.0
-    else:
-        logger.info("==> 🌍 开启服务器全量模式：标准配置" )
-        decoder_layers = 6
-        depth_dense = 48
-        max_q = 400
-        cost_bbox_val = 2.0
+
+    # 全量配置（服务器标准配置）
+    logger.info("==> 🌍 开启全量训练模式：标准配置")
+    decoder_layers = 6
+    depth_dense = 48
+    max_q = 400
+    cost_bbox_val = 2.0
 
     model = TDRDetector(
         num_classes=10 ,
@@ -153,6 +159,7 @@ def main():
             total_loss, total_cls_loss, total_reg_loss = 0.0, 0.0, 0.0
             total_matched, total_pos_acc, total_xyz_err = 0.0, 0.0, 0.0
             steps = len(dataloader)
+            actual_steps = 0  # 新增
             
             pbar = tqdm(dataloader, desc=f"Epoch {epoch}/{args.epochs}", mininterval=0.5, dynamic_ncols=True)
             for batch_idx, (images, boxes_2d, cam_intrinsics, cam_extrinsics, gt_bboxes, gt_labels) in enumerate(pbar):
@@ -162,6 +169,8 @@ def main():
                     tqdm.write("⚠️  遭遇全损空 Batch，已安全跳过！")
                     continue
                 # ============================================================
+                
+                actual_steps += 1  # 只处理有效batch时才计数
                 
                 images = images.to(device).float()
                 boxes_2d = boxes_2d.to(device).float()
@@ -214,21 +223,26 @@ def main():
                     'Err': f'{xyz_err:.2f}m'
                 })
             
-            avg_loss = total_loss / steps
-            avg_matched = total_matched / steps
-            avg_acc = total_pos_acc / steps
-            avg_err = total_xyz_err / steps
-            
-            with open(csv_path, 'a', newline='') as f:
-                csv_writer = csv.writer(f)
-                csv_writer.writerow([epoch, current_lr, avg_loss, total_cls_loss/steps, total_reg_loss/steps, avg_matched, avg_acc, avg_err])
+            # 使用实际处理的batch数计算平均值，避免除零错误
+            if actual_steps > 0:
+                avg_loss = total_loss / actual_steps
+                avg_matched = total_matched / actual_steps
+                avg_acc = total_pos_acc / actual_steps
+                avg_err = total_xyz_err / actual_steps
+
+                with open(csv_path, 'a', newline='') as f:
+                    csv_writer = csv.writer(f)
+                    csv_writer.writerow([epoch, current_lr, avg_loss, total_cls_loss/actual_steps, total_reg_loss/actual_steps, avg_matched, avg_acc, avg_err])
+            else:
+                logger.warning(f"Epoch {epoch}: 没有处理任何有效batch")
+                continue
             
             logger.info(f"==> Epoch {epoch}: LR={current_lr:.6f}, Loss={avg_loss:.2f}, Match={avg_matched:.1f}, Acc={avg_acc*100:.1f}%, XYZ_Err={avg_err:.2f}m")
             
             # 在每个 epoch 结束打印日志之后，写入 TensorBoard
             writer.add_scalar('Loss/Total', avg_loss, epoch)
-            writer.add_scalar('Loss/Cls', total_cls_loss/steps, epoch)
-            writer.add_scalar('Loss/Reg', total_reg_loss/steps, epoch)
+            writer.add_scalar('Loss/Cls', total_cls_loss/actual_steps, epoch)
+            writer.add_scalar('Loss/Reg', total_reg_loss/actual_steps, epoch)
             writer.add_scalar('Metrics/Pos_Acc', avg_acc, epoch)
             writer.add_scalar('Metrics/XYZ_Err', avg_err, epoch)
             

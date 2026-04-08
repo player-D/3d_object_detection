@@ -3,10 +3,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class TDRLifting(nn.Module):
-    def __init__(self, num_depth_dense=32, num_depth_local=8,   # 收紧参数
-                 depth_range=[2.0, 55.0], iou_threshold=0.20,   # 收紧参数
+    def __init__(self, num_depth_dense=48, num_depth_local=8,
+                 depth_range=[2.0, 55.0], iou_threshold=0.20,
                  space_range=[-51.2, 51.2],
-                 max_queries=300):  # 收紧参数
+                 max_queries=400):
         super().__init__()
         self.num_depth_dense = num_depth_dense
         self.num_depth_local = num_depth_local
@@ -118,32 +118,82 @@ class TDRLifting(nn.Module):
         
         valid_points_list = []
         padding_masks = []
-        
+
         for b in range(B):
-            batch_points = points_3d[b].flatten(0, 2)
-            batch_mask = final_mask[b].flatten()
-            batch_areas = areas[b].unsqueeze(-1).repeat(1, 1, D).flatten()[batch_mask]
-            
-            valid_pts = batch_points[batch_mask]
-            
+            batch_points = points_3d[b].flatten(0, 2)  # [N_cam*Num_boxes*D, 3]
+            batch_mask = final_mask[b].flatten()  # [N_cam*Num_boxes*D]
+
+            # batch_areas需要与batch_mask的长度匹配
+            # areas[b]是[N_cam, Num_boxes]，需要扩展到[N_cam, Num_boxes, D]
+            batch_areas = areas[b].unsqueeze(-1).repeat(1, 1, D).flatten()  # [N_cam*Num_boxes*D]
+
+            valid_pts = batch_points[batch_mask]  # 只保留mask为True的点
+            batch_areas = batch_areas[batch_mask]  # 只保留mask为True的areas
+
             # 物理过滤：确保点有效且深度在合理范围内
-            valid_pts = valid_pts[torch.isfinite(valid_pts).all(dim=-1)]
-            valid_pts = valid_pts[(valid_pts[..., 2] > 1.0) & (valid_pts[..., 2] < 70.0)]
-            
+            finite_mask = torch.isfinite(valid_pts).all(dim=-1)
+            valid_pts = valid_pts[finite_mask]
+            batch_areas = batch_areas[finite_mask]  # 同步过滤areas
+
+            depth_mask = (valid_pts[..., 2] > 1.0) & (valid_pts[..., 2] < 70.0)
+            valid_pts = valid_pts[depth_mask]
+            batch_areas = batch_areas[depth_mask]  # 同步过滤areas
+
             if valid_pts.shape[0] == 0:
                 valid_pts = torch.zeros(1, 3, device=device)
                 padding_masks.append(torch.ones(1, dtype=torch.bool, device=device))
             else:
+                # 【关键修复】跨相机点去重 - 使用距离阈值去除重复点
+                distance_threshold = 0.5  # 0.5米内的点视为重复
+
+                if valid_pts.shape[0] > 1:
+                    # 使用更高效的基于距离矩阵的去重方法
+                    # 计算所有点对之间的距离矩阵
+                    diff = valid_pts.unsqueeze(1) - valid_pts.unsqueeze(0)  # [N, N, 3]
+                    dist_matrix = torch.norm(diff, dim=-1)  # [N, N]
+
+                    # 创建上三角掩码（避免重复计算和自身比较）
+                    mask = torch.triu(torch.ones_like(dist_matrix, dtype=torch.bool), diagonal=1)
+                    dist_matrix = dist_matrix.masked_fill(~mask, float('inf'))
+
+                    # 找到距离小于阈值的点对
+                    duplicate_pairs = dist_matrix < distance_threshold
+
+                    # 使用并查集思想进行去重
+                    keep_mask = torch.ones(valid_pts.shape[0], dtype=torch.bool, device=device)
+                    for i in range(valid_pts.shape[0]):
+                        if not keep_mask[i]:
+                            continue
+                        # 找到所有与点i重复的点（不包括i自己）
+                        duplicates = duplicate_pairs[i].nonzero(as_tuple=True)[0]
+                        if len(duplicates) > 0:
+                            # 标记这些点为不保留
+                            keep_mask[duplicates] = False
+
+                    valid_pts = valid_pts[keep_mask]
+                    batch_areas = batch_areas[keep_mask]
+
+                # 去重后，如果仍然超过max_queries，按面积选择
                 k = min(self.max_queries, valid_pts.shape[0])
                 if valid_pts.shape[0] > self.max_queries:
                     _, topk_idx = torch.topk(batch_areas, k=k)
                     valid_pts = valid_pts[topk_idx]
+                # padding_mask的长度必须与valid_pts完全匹配
                 padding_masks.append(torch.zeros(valid_pts.shape[0], dtype=torch.bool, device=device))
-            
+
             valid_points_list.append(valid_pts)
-            
-        padded_points = torch.nn.utils.rnn.pad_sequence(valid_points_list, batch_first=True, padding_value=0.0)
-        key_padding_mask = torch.nn.utils.rnn.pad_sequence(padding_masks, batch_first=True, padding_value=True)
+
+        # 手动padding到固定长度
+        max_len = max(len(pts) for pts in valid_points_list)
+
+        padded_points = torch.zeros(B, max_len, 3, device=device, dtype=points_3d.dtype)
+        key_padding_mask = torch.ones(B, max_len, dtype=torch.bool, device=device)
+
+        for b in range(B):
+            num_pts = valid_points_list[b].shape[0]
+            padded_points[b, :num_pts] = valid_points_list[b]
+            key_padding_mask[b, :num_pts] = False  # False表示有效点
+
         return padded_points, key_padding_mask
 
     def _normalize_points(self, points_3d):
