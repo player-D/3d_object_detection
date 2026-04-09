@@ -1,29 +1,23 @@
 # TDR-QAF (3d_object_detection)
 
-本目录是当前可维护版本（只改这里，不改 `winsurf`）。  
-目标是稳定完成从训练到推理、后端 API、前端可视化的完整链路。
+本目录是当前维护版本。只修改本目录，不修改 `winsurf/`。
 
-## 这次重点修复
+## 1. 当前行为说明（重点）
 
-1. 推理样本抽取逻辑修复
-- 不加 `--load_indices` 时：在当前数据集池随机抽取（默认完整数据集）。
-- 加 `--load_indices` 时：只在训练保存的索引集合中抽取。
-- `tools/inference.py` 默认 `--max_samples=None`，不会再默认卡死 50 条。
+### 推理采样逻辑
+- 不加 `--load_indices`：从当前数据集池随机抽样（默认是完整数据集）。
+- 加 `--load_indices path/to/sample_indices.json`：只在训练保存的索引集合内抽样。
+- `--max_samples` 仅用于限制数据池（调试用），默认 `None`。
 
-2. 可视化稳定性修复
-- 六视角拼接前统一尺寸/通道/类型，避免 `cv2.hconcat` 报错。
-- 推理输出统一为三张图（每个样本）：
-  - `pred_<token>.jpg`：6 相机 GT + Pred 全量叠加
-  - `top_pair_<token>.jpg`：最高分 Pred 与匹配 GT 的左右分栏放大图
-  - `bev_<token>.jpg`：伪 3D 风格 BEV（带障碍物形体效果）
+### 每次推理固定输出三张图
+- `pred_<sample_token>.jpg`：6 相机拼图，叠加所有 GT + Pred 3D 框。
+- `top_pair_<sample_token>.jpg`：最高分 Pred 与匹配 GT 的左右分屏放大图。
+- `bev_<sample_token>.jpg`：伪 3D BEV（带障碍物体感，不是纯平面线框）。
 
-3. 全量 NuScenes 训练/推理支持
-- 数据集版本不再写死 `v1.0-mini`，支持参数化：
-  - `--nuscenes_version v1.0-mini`
-  - `--nuscenes_version v1.0-trainval`
-- 后端也支持环境变量切换路径和版本。
+### 可视化稳定性
+- 6 相机拼接前会统一图像尺寸/通道/类型，避免 `cv2.hconcat` 崩溃。
 
-## 环境准备
+## 2. 环境安装
 
 ```bash
 pip install -r requirements_gpu.txt
@@ -31,9 +25,16 @@ pip install -r requirements_gpu.txt
 pip install -r requirements_cpu.txt
 ```
 
-## 数据目录
+前端：
 
-默认数据根目录是 `./dataset`，示例结构：
+```bash
+cd frontend
+npm install
+```
+
+## 3. 数据目录
+
+默认根目录是 `./dataset`，示例：
 
 ```text
 dataset/
@@ -44,22 +45,29 @@ dataset/
   v1.0-trainval/
 ```
 
-## 训练
+## 4. 训练
 
-### 基础训练
+### mini 训练（快速验证）
 
 ```bash
-python tools/train.py --data_root ./dataset --nuscenes_version v1.0-mini
+python tools/train.py \
+  --data_root ./dataset \
+  --nuscenes_version v1.0-mini \
+  --batch_size 2 \
+  --num_workers 0 \
+  --epochs 20
 ```
 
-### 全量 NuScenes（服务器）
+### 全量 trainval（服务器）
 
 ```bash
 python tools/train.py \
   --data_root /path/to/nuscenes \
   --nuscenes_version v1.0-trainval \
-  --batch_size 4 \
-  --epochs 50
+  --batch_size 1 \
+  --num_workers 4 \
+  --lr 1e-4 \
+  --epochs 80
 ```
 
 ### 复用训练样本索引
@@ -68,33 +76,36 @@ python tools/train.py \
 python tools/train.py --load_indices saved_models/<run_id>/sample_indices.json
 ```
 
-> 每次训练会在对应 `saved_models/<run_id>/` 下保存 `sample_indices.json`。
+每次训练会在 `saved_models/<run_id>/sample_indices.json` 自动保存本次使用索引。
 
-## 推理（CLI）
+## 5. 推理（CLI）
 
-### 默认随机抽样（完整数据池）
-
-```bash
-python tools/inference.py --data_root ./dataset --nuscenes_version v1.0-mini
-```
-
-### 仅在训练样本上推理
+### 默认随机（完整数据池）
 
 ```bash
 python tools/inference.py \
-  --load_indices saved_models/<run_id>/sample_indices.json
+  --data_root ./dataset \
+  --nuscenes_version v1.0-mini \
+  --num_samples 2
 ```
 
-### 关键参数
+### 只在训练索引池推理
 
-- `--confidence`：置信度阈值（默认 `0.05`）
-- `--topk`：最多保留预测框数（默认 `50`）
-- `--max_samples`：限制可抽样数据池（默认 `None`，即不限制）
-- `--num_samples`：本次命令推理多少个样本（默认 `1`）
-- `--data_root`：数据集根路径
-- `--nuscenes_version`：NuScenes 版本（`v1.0-mini`/`v1.0-trainval`）
+```bash
+python tools/inference.py \
+  --load_indices saved_models/<run_id>/sample_indices.json \
+  --num_samples 2
+```
 
-## 后端与前端
+### 常用参数
+- `--confidence`：置信度阈值（默认 `0.05`）。
+- `--topk`：最多保留预测框数（默认 `50`）。
+- `--max_samples`：限制数据池大小（默认 `None`）。
+- `--num_samples`：本次命令推理样本数。
+- `--data_root`：NuScenes 根目录。
+- `--nuscenes_version`：`v1.0-mini` 或 `v1.0-trainval`。
+
+## 6. 后端与前端
 
 ### 启动后端
 
@@ -103,11 +114,10 @@ cd backend
 python main.py
 ```
 
-后端可通过环境变量切换数据集：
-
+后端支持环境变量：
 - `NUSCENES_ROOT`（默认 `./dataset`）
 - `NUSCENES_VERSION`（默认 `v1.0-mini`）
-- `NUSCENES_MAX_SAMPLES`（默认空，不限）
+- `NUSCENES_MAX_SAMPLES`（默认空，即不限制）
 
 示例：
 
@@ -121,26 +131,27 @@ python backend/main.py
 
 ```bash
 cd frontend
-npm install
 npm run dev
 ```
 
-## 输出说明
+## 7. 60G 数据集训练建议（你当前机器选择）
 
-单次推理（单样本）固定输出三张图：
+你给的两个卡里，优先用 **V100 16GB**（PyTorch/CUDA 兼容与稳定性通常更好）。
 
-1. 全量 GT + Pred 六视角拼接图  
-2. 最高分 Pred 与匹配 GT 的左右放大对比图  
-3. 伪 3D BEV 图（障碍物有体感，不是纯平面线框）
+### V100 16GB（推荐）
+- `--batch_size 1`（稳定起步，先跑通）
+- `--num_workers 4`
+- `--lr 1e-4`（若 batch=2 可试 `2e-4`）
+- `--epochs 80`（至少 50，建议 80 起）
+- `--nuscenes_version v1.0-trainval`
+- 不设置 `--max_samples`（全量训练）
 
-## 迁移说明（相对 winsurf）
+### 国产 32GB 卡（可选）
+- 显存更大，可尝试 `--batch_size 2` 或 `4`
+- 学习率按 batch 线性放大（如 batch=4 可尝试 `4e-4`）
+- 前提是驱动与 PyTorch 适配稳定，否则优先 V100
 
-已保留并增强的点：
-- 训练索引保存/加载链路
-- 三图输出思路
-- 推理与可视化的容错处理
+## 8. 已知注意事项
 
-已修复/替换的问题：
-- 默认限制 50 样本导致“非全量随机”的问题
-- “最佳 Pred 对应 GT”匹配逻辑不稳的问题
-- 六视角拼接尺寸/类型不一致导致的 OpenCV 崩溃
+- 当前仓库有未完成 merge 状态（`UU`），这是 Git 索引状态问题，不等于代码不可运行。
+- 如果你只看运行效果，优先按本 README 的训练/推理命令执行。
