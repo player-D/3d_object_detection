@@ -1,4 +1,5 @@
 import os
+import json
 import cv2
 import numpy as np
 import torch
@@ -10,12 +11,15 @@ from PIL import Image
 
 
 class NuScenesDataset(Dataset):
-    def __init__(self, root="./dataset", debug_mode=False):
+    def __init__(self, root="./dataset", debug_mode=False, max_samples=None, version='v1.0-mini'):
         self.root = root
         self.debug_mode = debug_mode
+        self.max_samples = max_samples
+        self.version = version
+        self.sample_indices = None
 
         if not debug_mode:
-            self.nusc = NuScenes(version='v1.0-mini', dataroot=root, verbose=True)
+            self.nusc = NuScenes(version=version, dataroot=root, verbose=True)
             self.samples = self.nusc.sample
 
             # 官方合并字典逻辑
@@ -51,13 +55,73 @@ class NuScenesDataset(Dataset):
         self.samples = [{} for _ in range(100)]
 
     def __len__(self):
-        return min(50, len(self.samples))
+        if self.sample_indices is not None:
+            return len(self.sample_indices)
+        if self.max_samples is not None:
+            return min(self.max_samples, len(self.samples))
+        return len(self.samples)
+
+    def get_sample_indices(self):
+        """获取当前数据集视图对应的样本索引列表。"""
+        if self.sample_indices is not None:
+            return list(self.sample_indices)
+        if self.max_samples is not None:
+            return list(range(min(len(self.samples), self.max_samples)))
+        return list(range(len(self.samples)))
+
+    def save_sample_indices(self, path):
+        """保存当前使用的样本索引，便于训练/推理复现。"""
+        indices = self.get_sample_indices()
+        sample_tokens = []
+        for idx in indices:
+            sample = self.samples[idx]
+            sample_tokens.append(sample.get('token') if isinstance(sample, dict) else None)
+
+        data = {
+            'indices': indices,
+            'tokens': sample_tokens,
+            'total_samples': len(self.samples),
+            'used_samples': len(indices)
+        }
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        print(f'样本索引已保存到: {path}')
+
+    @classmethod
+    def load_sample_indices(cls, path):
+        """从文件加载样本索引。"""
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+
+    def set_sample_indices(self, indices):
+        """设置当前数据集视图所使用的样本索引。"""
+        normalized = []
+        for idx in indices:
+            idx = int(idx)
+            if idx < 0 or idx >= len(self.samples):
+                raise IndexError(f'样本索引超出范围: {idx}')
+            normalized.append(idx)
+        self.sample_indices = normalized
+        print(f'已设置使用 {len(normalized)} 个指定样本索引')
+
+    def resolve_sample_index(self, index):
+        if self.sample_indices is not None:
+            return self.sample_indices[index]
+        return index
+
+    def get_sample_token(self, index):
+        actual_index = self.resolve_sample_index(index)
+        sample = self.samples[actual_index]
+        if isinstance(sample, dict):
+            return sample.get('token')
+        return None
 
     def __getitem__(self, index):
+        actual_index = self.resolve_sample_index(index)
         if self.debug_mode:
-            return self._get_fake_item(index)
+            return self._get_fake_item(actual_index)
         else:
-            return self._get_real_item(index)
+            return self._get_real_item(actual_index)
 
     def _get_fake_item(self, index):
         images = torch.randn(6, 3, 256, 704)

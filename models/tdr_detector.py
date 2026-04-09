@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision.models import resnet50
+from torchvision.models import ResNet50_Weights, resnet50
 from .tdr_head import TDRHead
 
 class SimpleFPN(nn.Module):
@@ -88,7 +88,10 @@ class TDRDetector(nn.Module):
         self.num_decoder_layers = num_decoder_layers
         
         # 定义 Backbone (ResNet50)
-        backbone = resnet50(weights='IMAGENET1K_V1')
+        try:
+            backbone = resnet50(weights=ResNet50_Weights.IMAGENET1K_V1)
+        except Exception:
+            backbone = resnet50(weights=None)
         # 提取 Backbone 的主要层
         self.backbone = nn.ModuleDict({
             'conv1': backbone.conv1,

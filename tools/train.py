@@ -34,12 +34,15 @@ def main():
     parser = argparse.ArgumentParser(description='TDR-QAF 3D Object Detection Training')
     parser.add_argument('--epochs', type=int, default=300, help='Number of training epochs')
     parser.add_argument('--data_root', type=str, default='./dataset', help='Dataset root path')
+    parser.add_argument('--nuscenes_version', type=str, default='v1.0-mini', help='NuScenes version, e.g. v1.0-mini or v1.0-trainval')
     parser.add_argument('--num_workers', type=int, default=0, help='Number of data loading workers')
     parser.add_argument('--batch_size', type=int, default=2, help='Batch size') # 降为 2
     parser.add_argument('--lr', type=float, default=1e-4, help='Initial learning rate') 
     parser.add_argument('--pretrained', type=str, default='', help='Pre-trained weight .pth file path')
     parser.add_argument('--resume', type=str, default='', help='Resume training from checkpoint .pth file path')
     parser.add_argument('--output_dir', type=str, default='output', help='Output directory')
+    parser.add_argument('--max_samples', type=int, default=None, help='限制样本数量（用于快速验证）')
+    parser.add_argument('--load_indices', type=str, default='', help='加载指定样本索引文件')
     parser.add_argument('--overfit', action='store_true', help='开启本地过拟合测试模式（简化模型）' )
     args = parser.parse_args()
     
@@ -75,12 +78,26 @@ def main():
     import torch.multiprocessing as mp
     
     try:
-        dataset = NuScenesDataset(root=args.data_root, debug_mode=False)
+        dataset = NuScenesDataset(
+            root=args.data_root,
+            debug_mode=False,
+            max_samples=args.max_samples,
+            version=args.nuscenes_version
+        )
         logger.info(f"==> 数据集加载成功，共 {len(dataset)} 个样本")
     except Exception as e:
         logger.error(f"==> 加载数据集失败: {e}")
         return
     
+    if args.load_indices:
+        indices_data = NuScenesDataset.load_sample_indices(args.load_indices)
+        dataset.set_sample_indices(indices_data['indices'])
+        logger.info(f"==> 已加载样本索引，共 {len(indices_data['indices'])} 个样本")
+
+    sample_indices_path = os.path.join(save_dir, 'sample_indices.json')
+    dataset.save_sample_indices(sample_indices_path)
+    logger.info(f"==> 训练样本索引已保存到: {sample_indices_path}")
+
     dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_size=args.batch_size,
@@ -153,6 +170,7 @@ def main():
             total_loss, total_cls_loss, total_reg_loss = 0.0, 0.0, 0.0
             total_matched, total_pos_acc, total_xyz_err = 0.0, 0.0, 0.0
             steps = len(dataloader)
+            actual_steps = 0
             
             pbar = tqdm(dataloader, desc=f"Epoch {epoch}/{args.epochs}", mininterval=0.5, dynamic_ncols=True)
             for batch_idx, (images, boxes_2d, cam_intrinsics, cam_extrinsics, gt_bboxes, gt_labels) in enumerate(pbar):
@@ -199,6 +217,7 @@ def main():
                 pos_acc = losses.get('pos_acc', 0)
                 xyz_err = losses.get('xyz_err_m', 0)
                 
+                actual_steps += 1
                 total_loss += loss.item()
                 total_cls_loss += loss_cls.item()
                 total_reg_loss += loss_reg.item()
@@ -214,21 +233,22 @@ def main():
                     'Err': f'{xyz_err:.2f}m'
                 })
             
-            avg_loss = total_loss / steps
-            avg_matched = total_matched / steps
-            avg_acc = total_pos_acc / steps
-            avg_err = total_xyz_err / steps
+            denom = max(1, actual_steps)
+            avg_loss = total_loss / denom
+            avg_matched = total_matched / denom
+            avg_acc = total_pos_acc / denom
+            avg_err = total_xyz_err / denom
             
             with open(csv_path, 'a', newline='') as f:
                 csv_writer = csv.writer(f)
-                csv_writer.writerow([epoch, current_lr, avg_loss, total_cls_loss/steps, total_reg_loss/steps, avg_matched, avg_acc, avg_err])
+                csv_writer.writerow([epoch, current_lr, avg_loss, total_cls_loss/denom, total_reg_loss/denom, avg_matched, avg_acc, avg_err])
             
             logger.info(f"==> Epoch {epoch}: LR={current_lr:.6f}, Loss={avg_loss:.2f}, Match={avg_matched:.1f}, Acc={avg_acc*100:.1f}%, XYZ_Err={avg_err:.2f}m")
             
             # 在每个 epoch 结束打印日志之后，写入 TensorBoard
             writer.add_scalar('Loss/Total', avg_loss, epoch)
-            writer.add_scalar('Loss/Cls', total_cls_loss/steps, epoch)
-            writer.add_scalar('Loss/Reg', total_reg_loss/steps, epoch)
+            writer.add_scalar('Loss/Cls', total_cls_loss/denom, epoch)
+            writer.add_scalar('Loss/Reg', total_reg_loss/denom, epoch)
             writer.add_scalar('Metrics/Pos_Acc', avg_acc, epoch)
             writer.add_scalar('Metrics/XYZ_Err', avg_err, epoch)
             

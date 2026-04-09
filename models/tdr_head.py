@@ -275,7 +275,7 @@ class TDRHead(nn.Module):
             )
 
             # 【核心架构升级 2】：最后一层不再更新 reference_points
-            if layer_idx < len(self.decoder_layers) - 1:
+            if layer_idx < len(self.decoder_layers) - 1 and layer_idx < len(self.refine_branches):
                 # 预测偏移量
                 delta = self.refine_branches[layer_idx](query)
 

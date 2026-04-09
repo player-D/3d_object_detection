@@ -16,6 +16,8 @@ class TDRLifting(nn.Module):
         self.space_range = space_range
         self.max_queries = max_queries  # 移除硬编码，使用传入的参数
         self.depth_std_base = nn.Parameter(torch.tensor(1.0))
+        self.query_min_xy_dist = 1.5
+        self.query_min_z_dist = 1.0
 
     def _get_center_points(self, boxes_2d):
         x1, y1, x2, y2 = boxes_2d[..., 0], boxes_2d[..., 1], boxes_2d[..., 2], boxes_2d[..., 3]
@@ -126,18 +128,20 @@ class TDRLifting(nn.Module):
             
             valid_pts = batch_points[batch_mask]
             
-            # 物理过滤：确保点有效且深度在合理范围内
-            valid_pts = valid_pts[torch.isfinite(valid_pts).all(dim=-1)]
-            valid_pts = valid_pts[(valid_pts[..., 2] > 1.0) & (valid_pts[..., 2] < 70.0)]
+            # 物理过滤：这里已经在 ego 坐标系下，z 是高度不是前向深度。
+            # 原先按 z∈[1, 70] 过滤会错误丢掉大量正常目标，只留下异常高点。
+            valid_mask_3d = torch.isfinite(valid_pts).all(dim=-1)
+            valid_mask_3d &= (valid_pts[..., 0] >= self.space_range[0]) & (valid_pts[..., 0] <= self.space_range[1])
+            valid_mask_3d &= (valid_pts[..., 1] >= self.space_range[0]) & (valid_pts[..., 1] <= self.space_range[1])
+            valid_mask_3d &= (valid_pts[..., 2] >= -10.0) & (valid_pts[..., 2] <= 10.0)
+            valid_pts = valid_pts[valid_mask_3d]
+            batch_areas = batch_areas[valid_mask_3d]
             
             if valid_pts.shape[0] == 0:
                 valid_pts = torch.zeros(1, 3, device=device)
                 padding_masks.append(torch.ones(1, dtype=torch.bool, device=device))
             else:
-                k = min(self.max_queries, valid_pts.shape[0])
-                if valid_pts.shape[0] > self.max_queries:
-                    _, topk_idx = torch.topk(batch_areas, k=k)
-                    valid_pts = valid_pts[topk_idx]
+                valid_pts = self._deduplicate_queries(valid_pts, batch_areas)
                 padding_masks.append(torch.zeros(valid_pts.shape[0], dtype=torch.bool, device=device))
             
             valid_points_list.append(valid_pts)
@@ -145,6 +149,30 @@ class TDRLifting(nn.Module):
         padded_points = torch.nn.utils.rnn.pad_sequence(valid_points_list, batch_first=True, padding_value=0.0)
         key_padding_mask = torch.nn.utils.rnn.pad_sequence(padding_masks, batch_first=True, padding_value=True)
         return padded_points, key_padding_mask
+
+    def _deduplicate_queries(self, valid_pts, batch_areas):
+        order = torch.argsort(batch_areas, descending=True)
+        ordered_pts = valid_pts[order]
+
+        keep = []
+        for idx in range(ordered_pts.shape[0]):
+            pt = ordered_pts[idx]
+            if not keep:
+                keep.append(idx)
+            else:
+                keep_idx = torch.tensor(keep, device=ordered_pts.device, dtype=torch.long)
+                kept_pts = ordered_pts[keep_idx]
+                xy_dist = torch.norm(kept_pts[:, :2] - pt[:2], dim=-1)
+                z_dist = torch.abs(kept_pts[:, 2] - pt[2])
+                is_duplicate = torch.any((xy_dist < self.query_min_xy_dist) & (z_dist < self.query_min_z_dist))
+                if not is_duplicate:
+                    keep.append(idx)
+
+            if len(keep) >= self.max_queries:
+                break
+
+        keep_idx = torch.tensor(keep, device=ordered_pts.device, dtype=torch.long)
+        return ordered_pts[keep_idx]
 
     def _normalize_points(self, points_3d):
         min_r, max_r = self.space_range

@@ -49,9 +49,12 @@
               <el-input-number 
                 v-model="sampleIndex" 
                 :min="0" 
-                :max="403" 
+                :max="Math.max(0, datasetSize - 1)" 
                 class="custom-input"
               />
+              <div style="font-size: 12px; color: #909399; margin-top: 5px;">
+                当前可选样本数：{{ datasetSize }}
+              </div>
             </el-form-item>
             
             <el-form-item>
@@ -161,6 +164,9 @@
                 hide-on-click-modal
                 class="result-image"
               />
+              <div style="padding-top: 8px; font-size: 12px; color: #909399;">
+                左图为最匹配 GT，右图为最高分 Pred（放大显示）
+              </div>
             </el-card>
             
             <el-card class="image-card" shadow="hover">
@@ -217,13 +223,16 @@ const deviceType = ref('CPU')
 const gtTotal = ref(0)
 const predDetails = ref({})
 const activeNames = ref(['1'])
+const datasetSize = ref(0)
+let healthTimer = null
 
 // 检查后端状态
 const checkBackendStatus = async () => {
   try {
-    const response = await axios.get('http://127.0.0.1:8000/api/health')
+    const response = await axios.get('http://127.0.0.1:8000/health')
     backendStatus.value = true
     deviceType.value = response.data.device || 'CPU'
+    datasetSize.value = response.data.dataset_size || 0
   } catch (error) {
     backendStatus.value = false
   }
@@ -258,9 +267,15 @@ const startDetection = async () => {
       if (response.data.stats) {
         gtTotal.value = response.data.stats.gt_total || 0
         predDetails.value = response.data.stats.pred_details || {}
+        detectionCount.value = response.data.stats.pred_total || 0
+        inferenceTime.value = response.data.stats.latency_ms || 0
+        currentSampleId.value = response.data.stats.sample_token || ''
       } else {
         gtTotal.value = 0
         predDetails.value = {}
+        detectionCount.value = 0
+        inferenceTime.value = 0
+        currentSampleId.value = ''
       }
       
       // 显示通知
@@ -310,11 +325,15 @@ const getCategoryIcon = (category) => {
 onMounted(() => {
   checkBackendStatus()
   // 每 10 秒检查一次后端状态
-  setInterval(checkBackendStatus, 10000)
+  healthTimer = setInterval(checkBackendStatus, 10000)
 })
 
 // 组件卸载时清理
 onUnmounted(() => {
+  if (healthTimer) {
+    clearInterval(healthTimer)
+    healthTimer = null
+  }
 })
 </script>
 

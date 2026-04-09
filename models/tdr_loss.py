@@ -92,6 +92,7 @@ class TDRLoss(nn.Module):
             
             num_gt = gt_labels.shape[0]
             num_query = cls_score.shape[0]
+            batch_matched_count = 0
             
             # ================== 增强数值检查 ==================
             if (torch.isnan(cls_score).any() or torch.isinf(cls_score).any() or
