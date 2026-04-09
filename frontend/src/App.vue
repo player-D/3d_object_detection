@@ -230,6 +230,7 @@ let healthTimer = null
 const checkBackendStatus = async () => {
   try {
     const response = await axios.get('http://127.0.0.1:8000/health')
+    const response = await axios.get('http://127.0.0.1:8000/health')
     backendStatus.value = true
     deviceType.value = response.data.device || 'CPU'
     datasetSize.value = response.data.dataset_size || 0
@@ -448,7 +449,8 @@ onUnmounted(() => {
 .image-container {
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 30px;
+  padding: 10px;
 }
 
 .image-card {

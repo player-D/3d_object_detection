@@ -3,10 +3,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class TDRLifting(nn.Module):
-    def __init__(self, num_depth_dense=32, num_depth_local=8,   # 收紧参数
-                 depth_range=[2.0, 55.0], iou_threshold=0.20,   # 收紧参数
+    def __init__(self, num_depth_dense=48, num_depth_local=8,
+                 depth_range=[2.0, 55.0], iou_threshold=0.20,
                  space_range=[-51.2, 51.2],
-                 max_queries=300):  # 收紧参数
+                 max_queries=400):
         super().__init__()
         self.num_depth_dense = num_depth_dense
         self.num_depth_local = num_depth_local
@@ -120,7 +120,7 @@ class TDRLifting(nn.Module):
         
         valid_points_list = []
         padding_masks = []
-        
+
         for b in range(B):
             batch_points = points_3d[b].flatten(0, 2)
             batch_mask = final_mask[b].flatten()
@@ -143,11 +143,20 @@ class TDRLifting(nn.Module):
             else:
                 valid_pts = self._deduplicate_queries(valid_pts, batch_areas)
                 padding_masks.append(torch.zeros(valid_pts.shape[0], dtype=torch.bool, device=device))
-            
+
             valid_points_list.append(valid_pts)
-            
-        padded_points = torch.nn.utils.rnn.pad_sequence(valid_points_list, batch_first=True, padding_value=0.0)
-        key_padding_mask = torch.nn.utils.rnn.pad_sequence(padding_masks, batch_first=True, padding_value=True)
+
+        # 手动padding到固定长度
+        max_len = max(len(pts) for pts in valid_points_list)
+
+        padded_points = torch.zeros(B, max_len, 3, device=device, dtype=points_3d.dtype)
+        key_padding_mask = torch.ones(B, max_len, dtype=torch.bool, device=device)
+
+        for b in range(B):
+            num_pts = valid_points_list[b].shape[0]
+            padded_points[b, :num_pts] = valid_points_list[b]
+            key_padding_mask[b, :num_pts] = False  # False表示有效点
+
         return padded_points, key_padding_mask
 
     def _deduplicate_queries(self, valid_pts, batch_areas):

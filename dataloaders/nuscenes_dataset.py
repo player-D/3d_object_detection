@@ -120,7 +120,9 @@ class NuScenesDataset(Dataset):
         actual_index = self.resolve_sample_index(index)
         if self.debug_mode:
             return self._get_fake_item(actual_index)
+            return self._get_fake_item(actual_index)
         else:
+            return self._get_real_item(actual_index)
             return self._get_real_item(actual_index)
 
     def _get_fake_item(self, index):
@@ -331,11 +333,15 @@ class NuScenesDataset(Dataset):
         min_x, min_y, max_x, max_y = box_2d
         area = (max_x - min_x) * (max_y - min_y)
         # 新增：太小（小于4）或太大（大于画面的80%）的异常框直接抛弃
-        if area < 4 or area > img_w * img_h * 0.8:   
+        if area < 4 or area > img_w * img_h * 0.8:
             return False
         return not (max_x < 0 or min_x > img_w or max_y < 0 or min_y > img_h)
 
     def _pad_boxes_2d(self, boxes_2d, max_boxes):
+        # 如果没有有效框，返回全0张量但标记为无效
+        if len(boxes_2d) == 0:
+            return torch.zeros(max_boxes, 4, dtype=torch.float32)
+
         padded = []
         for box in boxes_2d[:max_boxes]:
             padded.append(box)

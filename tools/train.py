@@ -110,19 +110,13 @@ def main():
         drop_last=True,
         multiprocessing_context=mp.get_context('spawn') if (torch.cuda.is_available() and args.num_workers > 0) else None
     )
-    
-    if args.overfit:
-        logger.info("==> 🚀 开启本地过拟合模式：模型极简，严厉过滤，强化回归" )
-        decoder_layers = 2
-        depth_dense = 24
-        max_q = 200
-        cost_bbox_val = 8.0
-    else:
-        logger.info("==> 🌍 开启服务器全量模式：标准配置" )
-        decoder_layers = 6
-        depth_dense = 48
-        max_q = 400
-        cost_bbox_val = 2.0
+
+    # 全量配置（服务器标准配置）
+    logger.info("==> 🌍 开启全量训练模式：标准配置")
+    decoder_layers = 6
+    depth_dense = 48
+    max_q = 400
+    cost_bbox_val = 2.0
 
     model = TDRDetector(
         num_classes=10 ,
@@ -180,6 +174,8 @@ def main():
                     tqdm.write("⚠️  遭遇全损空 Batch，已安全跳过！")
                     continue
                 # ============================================================
+                
+                actual_steps += 1  # 只处理有效batch时才计数
                 
                 images = images.to(device).float()
                 boxes_2d = boxes_2d.to(device).float()
