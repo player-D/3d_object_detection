@@ -120,9 +120,7 @@ class NuScenesDataset(Dataset):
         actual_index = self.resolve_sample_index(index)
         if self.debug_mode:
             return self._get_fake_item(actual_index)
-            return self._get_fake_item(actual_index)
         else:
-            return self._get_real_item(actual_index)
             return self._get_real_item(actual_index)
 
     def _get_fake_item(self, index):
