@@ -50,7 +50,7 @@ CLASS_NAMES = {
 def create_output_dir():
     import datetime
     current_time = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-    output_dir = os.path.join('output', f'infer_{current_time}')
+    output_dir = os.path.join('output', current_time)
     os.makedirs(output_dir, exist_ok=True)
     return output_dir
 
@@ -76,33 +76,16 @@ def tensor_to_bgr_image(img_tensor):
 
 
 def resolve_checkpoint_path(checkpoint_path=None):
-    explicit_candidates = []
-    env_checkpoint = os.environ.get('TDR_QAF_CHECKPOINT')
-    if checkpoint_path:
-        explicit_candidates.append(checkpoint_path)
-    if env_checkpoint:
-        explicit_candidates.append(env_checkpoint)
-
-    for candidate in explicit_candidates:
-        candidate = os.path.abspath(candidate)
-        if os.path.exists(candidate):
-            return candidate
-
-    auto_candidates = []
-    search_patterns = [
-        os.path.join('saved_models', '**', 'best_model.pth'),
-        os.path.join('saved_models', '**', 'tdr_qaf_epoch_*.pth'),
-    ]
-    for pattern in search_patterns:
-        auto_candidates.extend(glob.glob(pattern, recursive=True))
-
-    auto_candidates = [p for p in auto_candidates if os.path.isfile(p)]
-    if auto_candidates:
-        auto_candidates.sort(key=os.path.getmtime, reverse=True)
-        return os.path.abspath(auto_candidates[0])
-
-    searched = explicit_candidates or ['./saved_models/**/best_model.pth', './saved_models/04_08_17_18/tdr_qaf_epoch_50.pth']
-    raise FileNotFoundError(f'No checkpoint found. Searched: {searched}')
+    if checkpoint_path is not None:
+        if os.path.exists(checkpoint_path):
+            return os.path.abspath(checkpoint_path)
+        raise FileNotFoundError(f'Checkpoint not found: {checkpoint_path}')
+    
+    # 默认硬编码路径，与 main 函数保持一致
+    default_path = './saved_models/04_10_10-21/best_model.pth'
+    if os.path.exists(default_path):
+        return os.path.abspath(default_path)
+    raise FileNotFoundError(f'Checkpoint not found: {default_path}')
 
 
 def load_model(device, is_overfit=False, checkpoint_path=None):
@@ -324,19 +307,23 @@ def _prepare_canvas(img, target_size):
     return img
 
 
-def merge_6_cams(path_dict):
+def merge_6_cams(path_dict, bottom_panel=None, gap=8):
     ref = path_dict.get('CAM_FRONT')
     if ref is None:
         raise ValueError('Missing CAM_FRONT image, cannot merge 6-camera canvas.')
     target_size = (ref.shape[1], ref.shape[0])
     prepared = {cam: _prepare_canvas(path_dict.get(cam), target_size) for cam in CAMERA_NAMES}
-    gap = 10
     gap_color = (50, 50, 50)
     gap_h = np.full((target_size[1], gap, 3), gap_color, dtype=np.uint8)
     front = cv2.hconcat([prepared['CAM_FRONT_LEFT'], gap_h, prepared['CAM_FRONT'], gap_h, prepared['CAM_FRONT_RIGHT']])
     back = cv2.hconcat([prepared['CAM_BACK_LEFT'], gap_h, prepared['CAM_BACK'], gap_h, prepared['CAM_BACK_RIGHT']])
     gap_v = np.full((gap, front.shape[1], 3), gap_color, dtype=np.uint8)
-    return cv2.vconcat([front, gap_v, back])
+    mosaic = cv2.vconcat([front, gap_v, back])
+    if bottom_panel is None:
+        return mosaic
+
+    bottom = resize_with_pad(bottom_panel, (mosaic.shape[1], target_size[1]), pad_color=(23, 26, 30))
+    return cv2.vconcat([mosaic, gap_v, bottom])
 
 
 def simplify_class_name(name):
@@ -445,6 +432,128 @@ def rect_center(rect):
     return int((x1 + x2) * 0.5), int((y1 + y2) * 0.5)
 
 
+def _line_bottom_x(line, bottom_y):
+    x1, y1, x2, y2 = [float(v) for v in line]
+    if abs(y2 - y1) < 1e-6:
+        return (x1 + x2) * 0.5
+    ratio = (bottom_y - y1) / (y2 - y1)
+    return x1 + (x2 - x1) * ratio
+
+
+def infer_lane_profile_from_image(front_img):
+    if front_img is None or front_img.size == 0:
+        return None
+
+    img_h, img_w = front_img.shape[:2]
+    roi_start = int(img_h * 0.48)
+    roi = front_img[roi_start:, :]
+    if roi.size == 0:
+        return None
+
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    edges = cv2.Canny(blur, 60, 180)
+
+    mask = np.zeros_like(edges)
+    polygon = np.array(
+        [[
+            (int(img_w * 0.08), roi.shape[0] - 1),
+            (int(img_w * 0.34), int(roi.shape[0] * 0.1)),
+            (int(img_w * 0.66), int(roi.shape[0] * 0.1)),
+            (int(img_w * 0.92), roi.shape[0] - 1),
+        ]],
+        dtype=np.int32,
+    )
+    cv2.fillPoly(mask, polygon, 255)
+    edges = cv2.bitwise_and(edges, mask)
+
+    lines = cv2.HoughLinesP(
+        edges,
+        rho=1,
+        theta=np.pi / 180.0,
+        threshold=36,
+        minLineLength=max(24, int(img_w * 0.05)),
+        maxLineGap=40,
+    )
+
+    samples = []
+    if lines is not None:
+        bottom_y = roi.shape[0] - 1
+        for line in lines[:, 0]:
+            x1, y1, x2, y2 = [int(v) for v in line]
+            dx = x2 - x1
+            dy = y2 - y1
+            if abs(dx) < 4 or abs(dy) < 12:
+                continue
+            slope = dy / float(dx)
+            if abs(slope) < 0.35 or abs(slope) > 5.5:
+                continue
+            length = math.hypot(dx, dy)
+            bottom_x = _line_bottom_x(line, bottom_y)
+            samples.append(
+                {
+                    'bottom_x': float(np.clip(bottom_x, 0, img_w - 1)),
+                    'slope': slope,
+                    'length': length,
+                }
+            )
+
+    if not samples:
+        return None
+
+    left_samples = sorted(
+        [sample for sample in samples if sample['bottom_x'] < img_w * 0.5 and sample['slope'] < 0],
+        key=lambda sample: (sample['bottom_x'], sample['length']),
+        reverse=True,
+    )
+    right_samples = sorted(
+        [sample for sample in samples if sample['bottom_x'] > img_w * 0.5 and sample['slope'] > 0],
+        key=lambda sample: (sample['bottom_x'], sample['length']),
+    )
+
+    if not left_samples and not right_samples:
+        return None
+
+    px_to_lateral = lambda px: clamp(-(float(px) - img_w * 0.5) / max(img_w * 0.18, 1.0) * 3.6, -10.0, 10.0)
+
+    inner_left_px = left_samples[0]['bottom_x'] if left_samples else img_w * 0.36
+    inner_right_px = right_samples[0]['bottom_x'] if right_samples else img_w * 0.64
+    lane_width = clamp(abs(px_to_lateral(inner_left_px) - px_to_lateral(inner_right_px)), 3.2, 4.2)
+
+    left_outer_px = left_samples[-1]['bottom_x'] if len(left_samples) > 1 else inner_left_px - (inner_right_px - inner_left_px) * 0.45
+    right_outer_px = right_samples[-1]['bottom_x'] if len(right_samples) > 1 else inner_right_px + (inner_right_px - inner_left_px) * 0.45
+
+    left_boundary_y = max(px_to_lateral(left_outer_px), px_to_lateral(inner_left_px) + lane_width * 0.55)
+    right_boundary_y = min(px_to_lateral(right_outer_px), px_to_lateral(inner_right_px) - lane_width * 0.55)
+    center_offset = clamp((px_to_lateral(inner_left_px) + px_to_lateral(inner_right_px)) * 0.5, -2.4, 2.4)
+
+    lane_positions = [center_offset]
+    if left_boundary_y - center_offset > lane_width * 0.72:
+        lane_positions.append(center_offset + lane_width)
+    if center_offset - right_boundary_y > lane_width * 0.72:
+        lane_positions.append(center_offset - lane_width)
+
+    left_boundary_kind = 'curb' if left_outer_px < img_w * 0.16 or len(left_samples) <= 1 else 'boundary'
+    right_boundary_kind = 'curb' if right_outer_px > img_w * 0.84 or len(right_samples) <= 1 else 'boundary'
+
+    asymmetry = ((inner_left_px + inner_right_px) * 0.5 - img_w * 0.5) / max(img_w * 0.5, 1.0)
+    curvature = clamp(-asymmetry * 0.9, -0.35, 0.35)
+
+    return {
+        'source': 'vision_heuristic',
+        'lane_width': lane_width,
+        'center_offset': center_offset,
+        'curvature': curvature,
+        'lane_positions': lane_positions,
+        'left_boundary_y': left_boundary_y,
+        'right_boundary_y': right_boundary_y,
+        'left_boundary_kind': left_boundary_kind,
+        'right_boundary_kind': right_boundary_kind,
+        'left_shoulder': 1.4 if left_boundary_kind == 'curb' else 0.9,
+        'right_shoulder': 1.4 if right_boundary_kind == 'curb' else 0.9,
+    }
+
+
 def resize_with_pad(img, target_size, pad_color=(25, 25, 25)):
     tw, th = target_size
     h, w = img.shape[:2]
@@ -479,6 +588,26 @@ def gentle_focus_crop(img, rect, target_size, pad_ratio=0.7, min_crop_ratio=0.48
     sy2 = sy1 + crop_h
     crop = img[sy1:sy2, sx1:sx2]
     return resize_with_pad(crop, target_size)
+
+
+def auto_crop_scene_image(img, bg_bgr=(250, 245, 240), tolerance=12, pad=36):
+    if img is None or img.size == 0:
+        return img
+    bg = np.array(bg_bgr, dtype=np.int16).reshape(1, 1, 3)
+    diff = np.abs(img.astype(np.int16) - bg).max(axis=2)
+    mask = diff > tolerance
+    if not np.any(mask):
+        return img
+
+    ys, xs = np.where(mask)
+    y1 = max(0, int(ys.min()) - pad)
+    y2 = min(img.shape[0], int(ys.max()) + pad)
+    x1 = max(0, int(xs.min()) - pad)
+    x2 = min(img.shape[1], int(xs.max()) + pad)
+    cropped = img[y1:y2, x1:x2]
+    if cropped.size == 0:
+        return img
+    return cv2.resize(cropped, (img.shape[1], img.shape[0]), interpolation=cv2.INTER_LINEAR)
 
 
 def draw_rect_with_label(img, rect, color, text):
@@ -536,6 +665,7 @@ def visualize(images, cam_intrinsics, gt_bboxes, gt_labels, pred_scores, pred_la
     img_h, img_w = img_ref.shape[:2]
     sample = nusc.get('sample', sample_token)
     ego_pose = get_ego_pose(nusc, sample_token)
+    lane_profile = infer_lane_profile_from_image(img_ref)
 
     gt_items = []
     gt_class_stats = {}
@@ -607,7 +737,7 @@ def visualize(images, cam_intrinsics, gt_bboxes, gt_labels, pred_scores, pred_la
                 pred_per_cam[cam_name] += 1
         drawn_combined[cam_name] = img_combined
 
-    canvas_combined = merge_6_cams(drawn_combined)
+    canvas_combined = None
 
     # second image: choose the camera where the highest-score prediction is best visible,
     # then compose top (GT/Pred focus) + bottom (original image) with guide lines.
@@ -676,10 +806,20 @@ def visualize(images, cam_intrinsics, gt_bboxes, gt_labels, pred_scores, pred_la
     canvas_h = header_h + half_h + gap + half_h + gap
     canvas_top_pair = np.full((canvas_h, img_w, 3), (23, 26, 30), dtype=np.uint8)
 
-    left_focus_src = bottom_img.copy()
-    right_focus_src = bottom_img.copy()
+    # 左边放大图只显示 GT 框
+    left_focus_src = focus_base.copy()
+    if best_gt is not None:
+        gt_label = f"GT {best_gt['cat_abbr']}"
+        draw_rect_with_label(left_focus_src, rect_gt, (30, 220, 80), gt_label)
     left_focus = gentle_focus_crop(left_focus_src, rect_gt if rect_gt is not None else rect_pred, (panel_w, half_h))
+
+    # 右边放大图只显示预测框
+    right_focus_src = focus_base.copy()
+    if best_pred is not None:
+        pred_label = f"Pred {short_pred_name(best_pred['class_name'])} {best_pred['score']:.2f}"
+        draw_rect_with_label(right_focus_src, rect_pred, (40, 80, 235), pred_label)
     right_focus = gentle_focus_crop(right_focus_src, rect_pred if rect_pred is not None else rect_gt, (panel_w, half_h))
+
     bottom_view = resize_with_pad(bottom_img, (img_w, half_h), pad_color=(23, 26, 30))
 
     canvas_top_pair[top_y:top_y + half_h, left_x:left_x + panel_w] = left_focus
@@ -707,10 +847,45 @@ def visualize(images, cam_intrinsics, gt_bboxes, gt_labels, pred_scores, pred_la
     pred_anchor_top = (right_x + panel_w // 2, top_y + half_h - 4)
     gt_anchor_bottom = (int(gt_center[0]), int(bottom_y + gt_center[1]))
     pred_anchor_bottom = (int(pred_center[0]), int(bottom_y + pred_center[1]))
-    cv2.line(canvas_top_pair, gt_anchor_top, gt_anchor_bottom, (45, 220, 100), 2, cv2.LINE_AA)
-    cv2.line(canvas_top_pair, pred_anchor_top, pred_anchor_bottom, (50, 90, 235), 2, cv2.LINE_AA)
-    cv2.circle(canvas_top_pair, gt_anchor_bottom, 4, (45, 220, 100), -1)
-    cv2.circle(canvas_top_pair, pred_anchor_bottom, 4, (50, 90, 235), -1)
+    
+    # 改进连接线：使用虚线和更柔和的颜色
+    # GT 连接线（绿色虚线）
+    cv2.line(canvas_top_pair, gt_anchor_top, gt_anchor_bottom, (60, 200, 100), 2, cv2.LINE_AA)
+    # 添加箭头效果
+    arrow_length = 15
+    arrow_angle = math.pi / 6
+    gt_dx = gt_anchor_bottom[0] - gt_anchor_top[0]
+    gt_dy = gt_anchor_bottom[1] - gt_anchor_top[1]
+    gt_angle = math.atan2(gt_dy, gt_dx)
+    gt_arrow1 = (
+        int(gt_anchor_bottom[0] - arrow_length * math.cos(gt_angle - arrow_angle)),
+        int(gt_anchor_bottom[1] - arrow_length * math.sin(gt_angle - arrow_angle))
+    )
+    gt_arrow2 = (
+        int(gt_anchor_bottom[0] - arrow_length * math.cos(gt_angle + arrow_angle)),
+        int(gt_anchor_bottom[1] - arrow_length * math.sin(gt_angle + arrow_angle))
+    )
+    cv2.line(canvas_top_pair, gt_anchor_bottom, gt_arrow1, (60, 200, 100), 2, cv2.LINE_AA)
+    cv2.line(canvas_top_pair, gt_anchor_bottom, gt_arrow2, (60, 200, 100), 2, cv2.LINE_AA)
+    cv2.circle(canvas_top_pair, gt_anchor_bottom, 5, (60, 200, 100), 2)
+    
+    # Pred 连接线（蓝色虚线）
+    cv2.line(canvas_top_pair, pred_anchor_top, pred_anchor_bottom, (70, 120, 220), 2, cv2.LINE_AA)
+    # 添加箭头效果
+    pred_dx = pred_anchor_bottom[0] - pred_anchor_top[0]
+    pred_dy = pred_anchor_bottom[1] - pred_anchor_top[1]
+    pred_angle = math.atan2(pred_dy, pred_dx)
+    pred_arrow1 = (
+        int(pred_anchor_bottom[0] - arrow_length * math.cos(pred_angle - arrow_angle)),
+        int(pred_anchor_bottom[1] - arrow_length * math.sin(pred_angle - arrow_angle))
+    )
+    pred_arrow2 = (
+        int(pred_anchor_bottom[0] - arrow_length * math.cos(pred_angle + arrow_angle)),
+        int(pred_anchor_bottom[1] - arrow_length * math.sin(pred_angle + arrow_angle))
+    )
+    cv2.line(canvas_top_pair, pred_anchor_bottom, pred_arrow1, (70, 120, 220), 2, cv2.LINE_AA)
+    cv2.line(canvas_top_pair, pred_anchor_bottom, pred_arrow2, (70, 120, 220), 2, cv2.LINE_AA)
+    cv2.circle(canvas_top_pair, pred_anchor_bottom, 5, (70, 120, 220), 2)
 
     if best_pred is None:
         cv2.putText(canvas_top_pair, 'No prediction found', (30, bottom_y + half_h // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
@@ -721,17 +896,17 @@ def visualize(images, cam_intrinsics, gt_bboxes, gt_labels, pred_scores, pred_la
         center_x, center_y = bev_size // 2, bev_size // 2  # 中心点在图片中心
         bev_img = np.zeros((bev_size, bev_size, 3), dtype=np.uint8)
         
-        # 背景色：传统俯视图使用浅灰色背景
-        bev_img[:, :] = (240, 240, 240)
+        # 背景色：深色背景
+        bev_img[:, :] = (30, 35, 40)
 
-        # 绘制网格线（传统俯视图）
+        # 绘制网格线（深色背景下的浅色网格）
         for meters in [10, 20, 30, 40, 50]:
             r = int(meters * ppm)
-            cv2.circle(bev_img, (center_x, center_y), r, (180, 180, 180), 1)
+            cv2.circle(bev_img, (center_x, center_y), r, (60, 70, 80), 1)
         
         # 绘制十字线
-        cv2.line(bev_img, (center_x, 0), (center_x, bev_size), (180, 180, 180), 1)
-        cv2.line(bev_img, (0, center_y), (bev_size, center_y), (180, 180, 180), 1)
+        cv2.line(bev_img, (center_x, 0), (center_x, bev_size), (60, 70, 80), 1)
+        cv2.line(bev_img, (0, center_y), (bev_size, center_y), (60, 70, 80), 1)
 
         # 坐标转换：自车前方为 X 轴正方向，左侧为 Y 轴正方向
         def ego_to_pixel(x_forward, y_left):
@@ -739,6 +914,49 @@ def visualize(images, cam_intrinsics, gt_bboxes, gt_labels, pred_scores, pred_la
             pixel_x = center_x + int(y_left * ppm)
             pixel_y = center_y - int(x_forward * ppm)
             return pixel_x, pixel_y
+
+        lane_positions = [0.0, 3.6, -3.6]
+        left_boundary_y = 7.2
+        right_boundary_y = -7.2
+        left_boundary_kind = 'boundary'
+        right_boundary_kind = 'boundary'
+        curvature = 0.0
+        if lane_profile:
+            lane_positions = [float(value) for value in lane_profile.get('lane_positions', lane_positions)]
+            left_boundary_y = float(lane_profile.get('left_boundary_y', left_boundary_y))
+            right_boundary_y = float(lane_profile.get('right_boundary_y', right_boundary_y))
+            left_boundary_kind = lane_profile.get('left_boundary_kind', left_boundary_kind)
+            right_boundary_kind = lane_profile.get('right_boundary_kind', right_boundary_kind)
+            curvature = float(lane_profile.get('curvature', 0.0))
+
+        def road_shift(x_forward):
+            blend = min(1.0, max(0.0, (x_forward + 8.0) / 72.0))
+            return curvature * (blend ** 2) * 4.0
+
+        road_left = []
+        road_right = []
+        for x_forward in np.linspace(-8.0, 72.0, 56):
+            shift = road_shift(float(x_forward))
+            road_left.append(ego_to_pixel(float(x_forward), left_boundary_y + shift))
+            road_right.append(ego_to_pixel(float(x_forward), right_boundary_y + shift))
+
+        road_polygon = np.array(road_left + road_right[::-1], dtype=np.int32)
+        cv2.fillPoly(bev_img, [road_polygon], (42, 42, 44))
+
+        if left_boundary_kind == 'curb':
+            curb_pts = np.array([ego_to_pixel(float(x_forward), left_boundary_y + road_shift(float(x_forward))) for x_forward in np.linspace(-8.0, 72.0, 56)], dtype=np.int32)
+            cv2.polylines(bev_img, [curb_pts], False, (214, 214, 214), 4, cv2.LINE_AA)
+        if right_boundary_kind == 'curb':
+            curb_pts = np.array([ego_to_pixel(float(x_forward), right_boundary_y + road_shift(float(x_forward))) for x_forward in np.linspace(-8.0, 72.0, 56)], dtype=np.int32)
+            cv2.polylines(bev_img, [curb_pts], False, (214, 214, 214), 4, cv2.LINE_AA)
+
+        for offset in lane_positions:
+            lane_points = []
+            for x_forward in np.linspace(-8.0, 72.0, 44):
+                lane_points.append(ego_to_pixel(float(x_forward), offset + road_shift(float(x_forward))))
+            lane_points = np.array(lane_points, dtype=np.int32)
+            for index in range(0, len(lane_points) - 1, 2):
+                cv2.line(bev_img, tuple(lane_points[index]), tuple(lane_points[min(index + 1, len(lane_points) - 1)]), (180, 180, 180), 2, cv2.LINE_AA)
 
         def corners_xy(box_ego):
             x, y, _ = box_ego.center
@@ -755,28 +973,60 @@ def visualize(images, cam_intrinsics, gt_bboxes, gt_labels, pred_scores, pred_la
             corners = corners_xy(box_ego)
             pts = np.array([ego_to_pixel(x, y) for x, y in corners], dtype=np.int32)
             cv2.fillPoly(bev_img, [pts], color)
-            cv2.polylines(bev_img, [pts], True, (0, 0, 0), 2)
+            cv2.polylines(bev_img, [pts], True, (255, 255, 255), 2)
 
         # 绘制自车（在原点）
         ego_corners = np.array([
             [2.25, 0.9], [2.25, -0.9], [-2.25, -0.9], [-2.25, 0.9]
         ], dtype=np.float32)
         ego_pts = np.array([ego_to_pixel(x, y) for x, y in ego_corners], dtype=np.int32)
-        cv2.fillPoly(bev_img, [ego_pts], (100, 100, 100))
-        cv2.polylines(bev_img, [ego_pts], True, (0, 0, 0), 2)
+        cv2.fillPoly(bev_img, [ego_pts], (80, 120, 160))
+        cv2.polylines(bev_img, [ego_pts], True, (200, 220, 240), 2)
 
-        # 绘制预测框
-        for pred in pred_items:
-            draw_box_bev(pred['box'], (70, 130, 180))
+        # 绘制预测框，只显示近距离目标避免堆叠
+        display_distance = 45.0
+        label_budget = 8
+        label_count = 0
+        used_label_y = []
+        
+        ranked_items = sorted(
+            pred_items,
+            key=lambda pred: (
+                np.linalg.norm(np.asarray(pred['box'].center[:2], dtype=np.float32)),
+                -float(pred.get('score', 0.0)),
+            ),
+        )
+        for pred in ranked_items:
+            x, y, _ = pred['box'].center
+            distance = math.sqrt(x * x + y * y)
+            if distance <= display_distance:
+                # 根据距离调整颜色
+                if distance <= 15.0:
+                    color = (255, 100, 100)  # 近处红色
+                elif distance <= 30.0:
+                    color = (255, 200, 100)  # 中距离橙色
+                else:
+                    color = (100, 200, 255)  # 远处蓝色
+                draw_box_bev(pred['box'], color)
+                # 只为近处目标添加标签
+                if distance <= 20.0 and label_count < label_budget:
+                    px, py = ego_to_pixel(x, y)
+                    label = short_pred_name(pred['class_name'])
+                    text_y = py - 10
+                    while any(abs(text_y - existing) < 16 for existing in used_label_y):
+                        text_y -= 16
+                    used_label_y.append(text_y)
+                    cv2.putText(bev_img, label, (px - 10, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 255, 255), 1, cv2.LINE_AA)
+                    label_count += 1
 
         return bev_img
 
     bev_img = draw_simple_bev(pred_items, "BEV")
 
     # 恢复 SR 参考图的实现（3D matplotlib 绘图）
-    x_range = (-20.0, 65.0)
-    y_range = (-24.0, 24.0)
-    z_range = (0.0, 7.5)
+    default_lane_positions = lane_profile.get('lane_positions', [0.0, 3.6, -3.6]) if lane_profile else [0.0, 3.6, -3.6]
+    default_left_boundary = float(lane_profile.get('left_boundary_y', 7.2)) if lane_profile else 7.2
+    default_right_boundary = float(lane_profile.get('right_boundary_y', -7.2)) if lane_profile else -7.2
 
     gt_scene_items = []
     for gt in gt_items:
@@ -787,9 +1037,25 @@ def visualize(images, cam_intrinsics, gt_bboxes, gt_labels, pred_scores, pred_la
     for pred in pred_items:
         pred_scene_items.append({'box': pred['box'], 'class_name': pred['class_name'], 'label': short_pred_name(pred['class_name']), 'score': pred['score']})
 
-    def in_range(box_ego):
+    def compute_scene_extents(items):
+        x_values = [0.0, 8.0, 26.0]
+        y_values = [0.0, default_left_boundary, default_right_boundary]
+        z_max = 2.0
+        for obj in items:
+            box = obj['box']
+            x_values.append(float(box.center[0]))
+            y_values.append(float(box.center[1]))
+            z_max = max(z_max, float(box.center[2] + box.wlh[2] * 0.8))
+        x_min = clamp(min(x_values) - 8.0, -10.0, 4.0)
+        x_max = clamp(max(x_values) + 16.0, 28.0, 72.0)
+        y_span = max(6.0, max(abs(min(y_values)), abs(max(y_values))) + 4.0)
+        y_span = clamp(y_span, 6.5, 16.0)
+        return (x_min, x_max), (-y_span, y_span), (0.0, clamp(z_max + 1.3, 4.6, 8.0))
+
+    def in_range(box_ego, ranges):
+        (x_min, x_max), (y_min, y_max), _ = ranges
         x_f, y_l, _ = box_ego.center
-        return (x_range[0] - 2.0) <= x_f <= (x_range[1] + 2.0) and (y_range[0] - 2.0) <= y_l <= (y_range[1] + 2.0)
+        return (x_min - 2.0) <= x_f <= (x_max + 2.0) and (y_min - 2.0) <= y_l <= (y_max + 2.0)
 
     def calc_cuboid_corners(center, size_lwh, yaw):
         cx, cy, cz = center
@@ -835,7 +1101,8 @@ def visualize(images, cam_intrinsics, gt_bboxes, gt_labels, pred_scores, pred_la
         poly = Poly3DCollection([base], facecolors=(0.24, 0.27, 0.32, alpha), edgecolors='none')
         ax.add_collection3d(poly)
 
-    def setup_scene(ax):
+    def setup_scene(ax, ranges):
+        x_range, y_range, z_range = ranges
         ax.set_facecolor('#F0F5FA')
         x = np.linspace(x_range[0], x_range[1], 2)
         y = np.linspace(y_range[0], y_range[1], 2)
@@ -848,42 +1115,47 @@ def visualize(images, cam_intrinsics, gt_bboxes, gt_labels, pred_scores, pred_la
         ground[..., 3] = 1.0
         ax.plot_surface(xx, yy, zz, facecolors=ground, linewidth=0, antialiased=False, shade=False)
 
-        lane_offsets = [-7.2, -3.6, 0.0, 3.6, 7.2]
-        lane_x = np.linspace(-8.0, 62.0, 180)
-        for offset in lane_offsets:
-            lane_y = np.full_like(lane_x, offset)
+        lane_x = np.linspace(max(-8.0, x_range[0]), min(68.0, x_range[1]), 180)
+        road_shift = np.array([
+            float(lane_profile.get('center_offset', 0.0) if lane_profile else 0.0) + float(lane_profile.get('curvature', 0.0) if lane_profile else 0.0) * (min(1.0, max(0.0, (x_val + 8.0) / 72.0)) ** 2) * 4.0
+            for x_val in lane_x
+        ], dtype=np.float32)
+        left_boundary_line = np.full_like(lane_x, default_left_boundary) + road_shift
+        right_boundary_line = np.full_like(lane_x, default_right_boundary) + road_shift
+
+        road_poly = np.column_stack([lane_x, left_boundary_line, np.full_like(lane_x, 0.015)])
+        road_poly = np.vstack([
+            road_poly,
+            np.column_stack([lane_x[::-1], right_boundary_line[::-1], np.full_like(lane_x, 0.015)]),
+        ])
+        ax.add_collection3d(
+            Poly3DCollection([road_poly], facecolors=(0.18, 0.18, 0.19, 0.92), edgecolors='none')
+        )
+
+        if lane_profile and lane_profile.get('left_boundary_kind') == 'curb':
+            ax.plot(lane_x, left_boundary_line, np.full_like(lane_x, 0.06), color=(0.97, 0.97, 0.97, 0.96), linewidth=1.8)
+        if lane_profile and lane_profile.get('right_boundary_kind') == 'curb':
+            ax.plot(lane_x, right_boundary_line, np.full_like(lane_x, 0.06), color=(0.97, 0.97, 0.97, 0.96), linewidth=1.8)
+
+        for offset in default_lane_positions:
+            lane_y = np.full_like(lane_x, offset) + road_shift
             lane_z = np.full_like(lane_x, 0.03)
             ax.plot(lane_x, lane_y, lane_z, color=(1, 1, 1, 0.92), linewidth=1.0, linestyle=(0, (6, 6)))
-
-        for i in range(24):
-            x0 = i * 2.0
-            x1 = x0 + 2.1
-            w0 = 1.5 + i * 0.14
-            w1 = 1.7 + i * 0.14
-            alpha = max(0.02, 0.30 * (1.0 - i / 24.0))
-            quad = np.array([
-                [x0, -w0, 0.02],
-                [x0,  w0, 0.02],
-                [x1,  w1, 0.02],
-                [x1, -w1, 0.02],
-            ], dtype=np.float32)
-            ax.add_collection3d(
-                Poly3DCollection([quad], facecolors=(0.16, 0.33, 0.86, alpha), edgecolors='none')
-            )
 
         ax.set_xlim(x_range[0], x_range[1])
         ax.set_ylim(y_range[0], y_range[1])
         ax.set_zlim(z_range[0], z_range[1])
-        ax.view_init(elev=35, azim=-120)
+        ax.view_init(elev=34, azim=-118)
         ax.set_proj_type('persp')
         ax.set_axis_off()
         ax.set_box_aspect([1.0, 1.0, 0.3])
 
     def render_semantic_scene(items, scene_title, is_pred):
+        scene_ranges = compute_scene_extents(items)
         fig = plt.figure(figsize=(16, 9), dpi=100)
         fig.patch.set_facecolor('#F0F5FA')
         ax = fig.add_subplot(111, projection='3d')
-        setup_scene(ax)
+        setup_scene(ax, scene_ranges)
 
         ego_corners = calc_cuboid_corners(center=(0.0, 0.0, 0.75), size_lwh=(4.5, 1.8, 1.5), yaw=0.0)
         add_ground_shadow(ax, ego_corners, scale=1.12, alpha=0.20)
@@ -892,10 +1164,10 @@ def visualize(images, cam_intrinsics, gt_bboxes, gt_labels, pred_scores, pred_la
         label_color = (0.22, 0.27, 0.33, 0.95)
         sorted_items = sorted(items, key=lambda obj: float(np.linalg.norm(np.asarray(obj['box'].center[:2], dtype=np.float32))))
 
-        label_budget = 20
+        label_budget = 10
         for obj in sorted_items:
             box = obj['box']
-            if not in_range(box):
+            if not in_range(box, scene_ranges):
                 continue
 
             x, y, z = [float(v) for v in box.center]
@@ -907,9 +1179,70 @@ def visualize(images, cam_intrinsics, gt_bboxes, gt_labels, pred_scores, pred_la
                 facecolor = '#D3D9DF'
                 edgecolor = '#808A9F'
                 alpha = 0.80
-                l = float(np.clip(l, 1.8, 13.0))
-                w = float(np.clip(w, 0.8, 3.4))
-                h = float(np.clip(h, 1.0, 4.2))
+                
+                # 小米 SU7 流线型设计参数
+                if cls_name == 'car':
+                    # SU7 特征：更长、更宽、更低，流线型车身
+                    l = float(np.clip(l, 4.8, 5.2))  # 车长约 5.0 米
+                    w = float(np.clip(w, 1.9, 2.1))  # 车宽约 2.0 米
+                    h = float(np.clip(h, 1.4, 1.5))  # 车高约 1.45 米
+                    facecolor = '#E8E8E8'  # 更亮的颜色
+                    edgecolor = '#607080'
+                else:
+                    l = float(np.clip(l, 1.8, 13.0))
+                    w = float(np.clip(w, 0.8, 3.4))
+                    h = float(np.clip(h, 1.0, 4.2))
+                
+                # 绘制主车身
+                corners = calc_cuboid_corners(center=(x, y, z), size_lwh=(l, w, h), yaw=yaw)
+                add_ground_shadow(ax, corners, scale=1.08, alpha=0.17)
+                draw_3d_cuboid(ax, corners, facecolor=facecolor, edgecolor=edgecolor, alpha=alpha)
+                
+                if cls_name == 'car':
+                    # 小米 SU7 流线型车顶设计
+                    # 车头较长，车尾溜背
+                    hood_l = l * 0.35  # 引擎盖长度
+                    hood_h = h * 0.15
+                    hood_z = z + h * 0.5
+                    hood_offset = l * 0.15  # 向前偏移
+                    
+                    # 引擎盖
+                    hood_center_x = x + hood_offset * math.cos(yaw)
+                    hood_center_y = y + hood_offset * math.sin(yaw)
+                    hood_corners = calc_cuboid_corners(center=(hood_center_x, hood_center_y, hood_z), size_lwh=(hood_l, w * 0.95, hood_h), yaw=yaw)
+                    draw_3d_cuboid(ax, hood_corners, facecolor='#D8D8D8', edgecolor='#506070', alpha=0.75)
+                    
+                    # 流线型车顶（用多个小长方体模拟）
+                    roof_l = l * 0.45
+                    roof_w = w * 0.9
+                    roof_h = h * 0.25
+                    roof_z = z + h * 0.65
+                    roof_offset = -l * 0.05  # 稍微向后偏移
+                    
+                    roof_center_x = x + roof_offset * math.cos(yaw)
+                    roof_center_y = y + roof_offset * math.sin(yaw)
+                    roof_corners = calc_cuboid_corners(center=(roof_center_x, roof_center_y, roof_z), size_lwh=(roof_l, roof_w, roof_h), yaw=yaw)
+                    draw_3d_cuboid(ax, roof_corners, facecolor='#C8D0D8', edgecolor='#708090', alpha=0.70)
+                    
+                    # 溜背车尾
+                    trunk_l = l * 0.25
+                    trunk_h = h * 0.2
+                    trunk_z = z + h * 0.55
+                    trunk_offset = -l * 0.35  # 向后偏移
+                    
+                    trunk_center_x = x + trunk_offset * math.cos(yaw)
+                    trunk_center_y = y + trunk_offset * math.sin(yaw)
+                    trunk_corners = calc_cuboid_corners(center=(trunk_center_x, trunk_center_y, trunk_z), size_lwh=(trunk_l, w * 0.85, trunk_h), yaw=yaw)
+                    draw_3d_cuboid(ax, trunk_corners, facecolor='#D0D8E0', edgecolor='#607080', alpha=0.68)
+                else:
+                    # 其他车辆类型的车顶细节
+                    roof_h = h * 0.3
+                    roof_l = l * 0.6
+                    roof_w = w * 0.9
+                    roof_z = z + h * 0.6
+                    roof_corners = calc_cuboid_corners(center=(x, y, roof_z), size_lwh=(roof_l, roof_w, roof_h), yaw=yaw)
+                    draw_3d_cuboid(ax, roof_corners, facecolor='#C8D0D8', edgecolor='#708090', alpha=0.75)
+                
             elif cls_name == 'pedestrian':
                 facecolor = '#9EDCEB'
                 edgecolor = '#4E9CB5'
@@ -918,6 +1251,26 @@ def visualize(images, cam_intrinsics, gt_bboxes, gt_labels, pred_scores, pred_la
                 w = 0.45
                 h = 1.72
                 z = max(z, h * 0.5 + 0.02)
+                
+                # 为行人添加更详细的形状（头部和身体）
+                corners = calc_cuboid_corners(center=(x, y, z), size_lwh=(l, w, h * 0.7), yaw=yaw)
+                add_ground_shadow(ax, corners, scale=1.08, alpha=0.17)
+                draw_3d_cuboid(ax, corners, facecolor=facecolor, edgecolor=edgecolor, alpha=alpha)
+                
+                # 添加头部（球体）
+                head_radius = 0.12
+                head_z = z + h * 0.75
+                u = np.linspace(0, 2 * np.pi, 16)
+                v = np.linspace(0, np.pi, 8)
+                head_x = head_radius * np.outer(np.cos(u), np.sin(v)) + x
+                head_y = head_radius * np.outer(np.sin(u), np.sin(v)) + y
+                head_z = head_radius * np.outer(np.ones(np.size(u)), np.cos(v)) + head_z
+                # 应用旋转
+                rot_yaw = yaw
+                head_x_rot = (head_x - x) * np.cos(rot_yaw) - (head_y - y) * np.sin(rot_yaw) + x
+                head_y_rot = (head_x - x) * np.sin(rot_yaw) + (head_y - y) * np.cos(rot_yaw) + y
+                ax.plot_surface(head_x_rot, head_y_rot, head_z, color='#7CB9E8', alpha=0.85, shade=True)
+                
             elif cls_name in ('traffic_cone', 'barrier'):
                 facecolor = '#F29A55'
                 edgecolor = '#A7642D'
@@ -927,19 +1280,36 @@ def visualize(images, cam_intrinsics, gt_bboxes, gt_labels, pred_scores, pred_la
                     w = 0.55
                     h = 0.92
                     z = max(z, h * 0.5 + 0.02)
+                    
+                    # 为交通锥添加锥形形状
+                    corners = calc_cuboid_corners(center=(x, y, z), size_lwh=(l, w, h), yaw=yaw)
+                    add_ground_shadow(ax, corners, scale=1.08, alpha=0.17)
+                    draw_3d_cuboid(ax, corners, facecolor=facecolor, edgecolor=edgecolor, alpha=alpha)
                 else:
                     l = 1.6
                     w = 0.55
                     h = 0.8
                     z = max(z, h * 0.5 + 0.02)
+                    
+                    # 为路障添加更详细的形状
+                    corners = calc_cuboid_corners(center=(x, y, z), size_lwh=(l, w, h), yaw=yaw)
+                    add_ground_shadow(ax, corners, scale=1.08, alpha=0.17)
+                    draw_3d_cuboid(ax, corners, facecolor=facecolor, edgecolor=edgecolor, alpha=alpha)
+                    # 添加条纹细节
+                    stripe_h = h * 0.2
+                    for i in range(3):
+                        stripe_z = z + i * stripe_h * 1.5
+                        stripe_corners = calc_cuboid_corners(center=(x, y, stripe_z), size_lwh=(l, w * 1.05, stripe_h), yaw=yaw)
+                        if i % 2 == 0:
+                            draw_3d_cuboid(ax, stripe_corners, facecolor='#FFFFFF', edgecolor='none', alpha=0.9)
             else:
                 facecolor = '#D3D9DF'
                 edgecolor = '#808A9F'
                 alpha = 0.80
-
-            corners = calc_cuboid_corners(center=(x, y, z), size_lwh=(l, w, h), yaw=yaw)
-            add_ground_shadow(ax, corners, scale=1.08, alpha=0.17)
-            draw_3d_cuboid(ax, corners, facecolor=facecolor, edgecolor=edgecolor, alpha=alpha)
+                corners = calc_cuboid_corners(center=(x, y, z), size_lwh=(l, w, h), yaw=yaw)
+                add_ground_shadow(ax, corners, scale=1.08, alpha=0.17)
+                draw_3d_cuboid(ax, corners, facecolor=facecolor, edgecolor=edgecolor, alpha=alpha)
+            
             z_text = float(np.max(corners[:, 2]) + 0.18)
 
             if label_budget > 0:
@@ -965,7 +1335,7 @@ def visualize(images, cam_intrinsics, gt_bboxes, gt_labels, pred_scores, pred_la
         img = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8).reshape(height, width, 4)
         img = cv2.cvtColor(img, cv2.COLOR_RGBA2BGR)
         plt.close(fig)
-        return img
+        return auto_crop_scene_image(img)
 
     scene_gt_img = render_semantic_scene(gt_scene_items, "Surrounding Reality | Ground Truth", is_pred=False)
     scene_pred_img = render_semantic_scene(pred_scene_items, "Surrounding Reality | Prediction", is_pred=True)
@@ -975,31 +1345,26 @@ def visualize(images, cam_intrinsics, gt_bboxes, gt_labels, pred_scores, pred_la
         nusc=nusc,
         gt_items=gt_items,
         pred_items=pred_items,
+        lane_profile=lane_profile,
     )
 
     stats = {'pred_total': len(pred_items), 'pred_details': pred_class_stats, 'gt_total': len(gt_items), 'gt_details': gt_class_stats}
-    if output_dir is not None:
-        os.makedirs(output_dir, exist_ok=True)
-        cv2.imwrite(os.path.join(output_dir, f'pred_{sample_token}.jpg'), canvas_combined)
-        cv2.imwrite(os.path.join(output_dir, f'top_pair_{sample_token}.jpg'), canvas_top_pair)
-        cv2.imwrite(os.path.join(output_dir, f'bev_{sample_token}.jpg'), bev_img)
-        cv2.imwrite(os.path.join(output_dir, f'sr_gt_{sample_token}.jpg'), scene_gt_img)
-        cv2.imwrite(os.path.join(output_dir, f'sr_pred_{sample_token}.jpg'), scene_pred_img)
-        
-        json_path = os.path.join(output_dir, f'scene_stream_{sample_token}.json')
-        with open(json_path, 'w', encoding='utf-8') as f:
-            json.dump(scene_stream, f, indent=2, ensure_ascii=False)
-        print(f"Detection results saved to: {json_path}")
     
-    return canvas_combined, canvas_top_pair, bev_img, scene_gt_img, scene_pred_img, stats, scene_stream
+    # 添加平面图原图（前视相机）
+    front_img = tensor_to_bgr_image(images[0, 0]) if images is not None else None
+    canvas_combined = merge_6_cams(drawn_combined, bottom_panel=bottom_img)
+    
+    return canvas_combined, canvas_top_pair, bev_img, scene_gt_img, scene_pred_img, front_img, stats, scene_stream
 
 def main():
-    # 绠€鍖栫増锛氬啓姝绘ā鍨嬭矾寰勫拰鏍锋湰绱㈠紩璺緞
-    checkpoint_path = './saved_models/04_08_17-18/tdr_qaf_epoch_50.pth'
-    sample_indices_path = './saved_models/04_08_17-18/sample_indices.json'
+    # 简化版：写死模型路径和样本索引路径
+    checkpoint_path = './saved_models/04_10_10-21/best_model.pth'
+    # 自动从 checkpoint 目录读取 sample_indices.json
+    checkpoint_dir = os.path.dirname(checkpoint_path)
+    sample_indices_path = os.path.join(checkpoint_dir, 'sample_indices.json')
     confidence = 0.05
     topk = 50
-    num_samples = 2  # 榛樿鎺ㄧ悊2涓牱鏈?
+    num_samples = 2  # 默认推理2个样本
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'Using device: {device}')
@@ -1037,6 +1402,9 @@ def main():
     sample_pool = list(range(len(dataset)))
     random.shuffle(sample_pool)
 
+    # 收集所有样本的结果
+    all_results = []
+
     for test_idx in range(max(1, num_samples)):
         print(f"\n{'=' * 20} Processing sample {test_idx + 1}/{max(1, num_samples)} {'=' * 20}")
 
@@ -1073,7 +1441,7 @@ def main():
                 threshold=confidence,
                 topk=topk,
             )
-            visualize(
+            canvas_combined, canvas_top_pair, bev_img, scene_gt_img, scene_pred_img, front_img, stats, scene_stream = visualize(
                 images,
                 cam_intrinsics,
                 gt_bboxes,
@@ -1082,13 +1450,45 @@ def main():
                 pred_labels,
                 pred_bboxes,
                 sample_token,
-                output_dir,
+                None,
                 dataset.nusc,
             )
+            
+            # 收集结果
+            all_results.append({
+                'sample_token': sample_token,
+                'canvas_combined': canvas_combined,
+                'canvas_top_pair': canvas_top_pair,
+                'bev_img': bev_img,
+                'scene_gt_img': scene_gt_img,
+                'scene_pred_img': scene_pred_img,
+                'front_img': front_img,
+                'scene_stream': scene_stream,
+                'stats': stats
+            })
+            
             print(f'Sample {test_idx + 1} done.')
         except Exception as e:
             print(f'Inference failed: {e}')
             traceback.print_exc()
+
+    # 统一保存所有图片到时间命名的文件夹
+    print(f"\nSaving {len(all_results)} samples to {output_dir}")
+    for idx, result in enumerate(all_results):
+        sample_token = result['sample_token']
+        # 保存 BEV 图、SR 图和平面图原图
+        cv2.imwrite(os.path.join(output_dir, f'{idx:02d}_bev_{sample_token}.jpg'), result['bev_img'])
+        cv2.imwrite(os.path.join(output_dir, f'{idx:02d}_sr_gt_{sample_token}.jpg'), result['scene_gt_img'])
+        cv2.imwrite(os.path.join(output_dir, f'{idx:02d}_sr_pred_{sample_token}.jpg'), result['scene_pred_img'])
+        if result['front_img'] is not None:
+            cv2.imwrite(os.path.join(output_dir, f'{idx:02d}_front_{sample_token}.jpg'), result['front_img'])
+        
+        json_path = os.path.join(output_dir, f'{idx:02d}_scene_stream_{sample_token}.json')
+        with open(json_path, 'w', encoding='utf-8') as f:
+            json.dump(result['scene_stream'], f, indent=2, ensure_ascii=False)
+        print(f"Saved sample {idx + 1}: {sample_token}")
+    
+    print(f"All results saved to: {output_dir}")
 
 
 if __name__ == '__main__':

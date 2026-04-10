@@ -75,7 +75,7 @@ function yawToCorners(box3d) {
 
 function drawGrid(ctx, width, height) {
   ctx.save()
-  ctx.strokeStyle = 'rgba(152, 184, 214, 0.12)'
+  ctx.strokeStyle = 'rgba(152, 184, 214, 0.08)'
   ctx.lineWidth = 1
 
   for (let lane = -12; lane <= 12; lane += 3) {
@@ -98,6 +98,101 @@ function drawGrid(ctx, width, height) {
     ctx.fillStyle = 'rgba(198, 214, 230, 0.62)'
     ctx.font = '12px Bahnschrift, Segoe UI, sans-serif'
     ctx.fillText(`${meter}m`, right.x - 6, right.y - 8)
+  }
+  ctx.restore()
+}
+
+function averageLaneOffset(lane) {
+  if (!Array.isArray(lane?.points) || !lane.points.length) {
+    return 0
+  }
+  return lane.points.reduce((sum, point) => sum + point.y, 0) / lane.points.length
+}
+
+function buildRoadEnvelope(scene) {
+  const boundaries = Array.isArray(scene?.lanes?.boundaries) ? scene.lanes.boundaries : []
+  const corridor = Array.isArray(scene?.lanes?.corridor) ? scene.lanes.corridor : []
+  const leftBoundary = boundaries
+    .filter((lane) => averageLaneOffset(lane) >= 0)
+    .sort((left, right) => averageLaneOffset(right) - averageLaneOffset(left))[0]
+  const rightBoundary = boundaries
+    .filter((lane) => averageLaneOffset(lane) <= 0)
+    .sort((left, right) => averageLaneOffset(left) - averageLaneOffset(right))[0]
+
+  if (leftBoundary && rightBoundary) {
+    return {
+      left: leftBoundary.points,
+      right: rightBoundary.points,
+      leftKind: leftBoundary.kind,
+      rightKind: rightBoundary.kind,
+    }
+  }
+
+  if (corridor.length) {
+    return {
+      left: corridor.map((point) => ({ x: point.x, y: point.left_y })),
+      right: corridor.map((point) => ({ x: point.x, y: point.right_y })),
+      leftKind: 'boundary',
+      rightKind: 'boundary',
+    }
+  }
+
+  return null
+}
+
+function drawRoadBody(ctx, scene, width, height) {
+  const envelope = buildRoadEnvelope(scene)
+  if (!envelope || envelope.left.length < 2 || envelope.right.length < 2) {
+    return
+  }
+
+  ctx.save()
+  ctx.beginPath()
+  envelope.left.forEach((point, index) => {
+    const pixel = toCanvasPoint(point.x, point.y, width, height)
+    if (index === 0) {
+      ctx.moveTo(pixel.x, pixel.y)
+    } else {
+      ctx.lineTo(pixel.x, pixel.y)
+    }
+  })
+  for (let index = envelope.right.length - 1; index >= 0; index -= 1) {
+    const point = envelope.right[index]
+    const pixel = toCanvasPoint(point.x, point.y, width, height)
+    ctx.lineTo(pixel.x, pixel.y)
+  }
+  ctx.closePath()
+  ctx.fillStyle = 'rgba(52, 52, 54, 0.88)'
+  ctx.fill()
+
+  if (envelope.leftKind === 'curb') {
+    ctx.strokeStyle = 'rgba(236, 237, 239, 0.85)'
+    ctx.lineWidth = 4
+    ctx.beginPath()
+    envelope.left.forEach((point, index) => {
+      const pixel = toCanvasPoint(point.x, point.y, width, height)
+      if (index === 0) {
+        ctx.moveTo(pixel.x, pixel.y)
+      } else {
+        ctx.lineTo(pixel.x, pixel.y)
+      }
+    })
+    ctx.stroke()
+  }
+
+  if (envelope.rightKind === 'curb') {
+    ctx.strokeStyle = 'rgba(236, 237, 239, 0.85)'
+    ctx.lineWidth = 4
+    ctx.beginPath()
+    envelope.right.forEach((point, index) => {
+      const pixel = toCanvasPoint(point.x, point.y, width, height)
+      if (index === 0) {
+        ctx.moveTo(pixel.x, pixel.y)
+      } else {
+        ctx.lineTo(pixel.x, pixel.y)
+      }
+    })
+    ctx.stroke()
   }
   ctx.restore()
 }
@@ -134,9 +229,15 @@ function drawLane(ctx, lane, width, height, dashed = false) {
   }
 
   ctx.save()
-  ctx.strokeStyle = dashed ? 'rgba(255, 255, 255, 0.55)' : 'rgba(114, 145, 175, 0.62)'
-  ctx.lineWidth = dashed ? 1.3 : 1.1
-  ctx.setLineDash(dashed ? [10, 10] : [])
+  const laneKind = lane.kind || 'boundary'
+  const isCurb = laneKind === 'curb'
+  ctx.strokeStyle = isCurb
+    ? 'rgba(245, 246, 248, 0.92)'
+    : dashed
+      ? 'rgba(255, 255, 255, 0.6)'
+      : 'rgba(114, 145, 175, 0.7)'
+  ctx.lineWidth = isCurb ? 3.2 : dashed ? 1.4 : 1.2
+  ctx.setLineDash(isCurb ? [] : dashed ? [10, 10] : [])
   ctx.beginPath()
   lane.points.forEach((point, index) => {
     const pixel = toCanvasPoint(point.x, point.y, width, height)
@@ -150,7 +251,7 @@ function drawLane(ctx, lane, width, height, dashed = false) {
   ctx.restore()
 }
 
-function drawObject(ctx, objectItem, width, height) {
+function drawObject(ctx, objectItem, width, height, labelAnchorY = null, showLabel = true) {
   const corners = yawToCorners(objectItem.box3d).map((corner) =>
     toCanvasPoint(corner.x, corner.y, width, height),
   )
@@ -210,9 +311,12 @@ function drawObject(ctx, objectItem, width, height) {
     ctx.stroke()
   }
 
-  ctx.fillStyle = objectItem.source === 'gt' ? '#9df3c7' : '#eff7ff'
-  ctx.font = '12px Bahnschrift, Segoe UI, sans-serif'
-  ctx.fillText(objectItem.label, center.x + 8, center.y - 8)
+  if (showLabel) {
+    ctx.fillStyle = objectItem.source === 'gt' ? '#9df3c7' : '#eff7ff'
+    ctx.font = '12px Bahnschrift, Segoe UI, sans-serif'
+    const labelY = labelAnchorY ?? center.y - 8
+    ctx.fillText(objectItem.label, center.x + 8, labelY)
+  }
   ctx.restore()
 }
 
@@ -255,16 +359,45 @@ function render() {
   ctx.fillStyle = gradient
   ctx.fillRect(0, 0, width, height)
 
+  drawRoadBody(ctx, props.scene, width, height)
   drawGrid(ctx, width, height)
   drawCorridor(ctx, props.scene?.lanes?.corridor, width, height)
   ;(props.scene?.lanes?.centerlines || []).forEach((lane) => drawLane(ctx, lane, width, height, true))
   ;(props.scene?.lanes?.boundaries || []).forEach((lane) => drawLane(ctx, lane, width, height, false))
 
   drawEgo(ctx, props.scene.ego, width, height)
+  const labelRows = []
+  let gtLabels = 0
+  let predLabels = 0
   ;(props.scene?.objects || [])
     .slice()
-    .sort((left, right) => (left.source === 'gt' ? -1 : 1) - (right.source === 'gt' ? -1 : 1))
-    .forEach((objectItem) => drawObject(ctx, objectItem, width, height))
+    .sort((left, right) => {
+      const leftRank = left.source === 'pred' ? 1 : 0
+      const rightRank = right.source === 'pred' ? 1 : 0
+      if (leftRank !== rightRank) {
+        return leftRank - rightRank
+      }
+      return left.box3d.center.x - right.box3d.center.x
+    })
+    .forEach((objectItem) => {
+      const basePoint = toCanvasPoint(objectItem.box3d.center.x, objectItem.box3d.center.y, width, height)
+      let labelY = basePoint.y - 8
+      while (labelRows.some((existing) => Math.abs(existing - labelY) < 16)) {
+        labelY -= 16
+      }
+      const allowLabel = objectItem.source === 'pred'
+        ? predLabels < 8 && (objectItem.threat_level !== 'low' || objectItem.box3d.center.x < 22)
+        : gtLabels < 4 && objectItem.box3d.center.x < 18
+      drawObject(ctx, objectItem, width, height, labelY, allowLabel)
+      if (allowLabel) {
+        labelRows.push(labelY)
+        if (objectItem.source === 'pred') {
+          predLabels += 1
+        } else {
+          gtLabels += 1
+        }
+      }
+    })
 }
 
 onMounted(() => {

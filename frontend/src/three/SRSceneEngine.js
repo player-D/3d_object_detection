@@ -68,6 +68,99 @@ function createCorridorMesh(corridor) {
   )
 }
 
+function averageLaneOffset(lane) {
+  if (!Array.isArray(lane?.points) || !lane.points.length) {
+    return 0
+  }
+  return lane.points.reduce((sum, point) => sum + point.y, 0) / lane.points.length
+}
+
+function createRoadSurfaceMesh(lanes) {
+  const boundaries = Array.isArray(lanes?.boundaries) ? lanes.boundaries : []
+  let leftBoundary = boundaries
+    .filter((lane) => averageLaneOffset(lane) >= 0)
+    .sort((left, right) => averageLaneOffset(right) - averageLaneOffset(left))[0]
+  let rightBoundary = boundaries
+    .filter((lane) => averageLaneOffset(lane) <= 0)
+    .sort((left, right) => averageLaneOffset(left) - averageLaneOffset(right))[0]
+
+  if (!leftBoundary || !rightBoundary) {
+    const corridor = Array.isArray(lanes?.corridor) ? lanes.corridor : []
+    if (!corridor.length) {
+      return null
+    }
+    leftBoundary = { points: corridor.map((point) => ({ x: point.x, y: point.left_y })), kind: 'boundary' }
+    rightBoundary = { points: corridor.map((point) => ({ x: point.x, y: point.right_y })), kind: 'boundary' }
+  }
+
+  const positions = []
+  const leftPoints = leftBoundary.points
+  const rightPoints = rightBoundary.points
+  const segmentCount = Math.min(leftPoints.length, rightPoints.length)
+  for (let index = 1; index < segmentCount; index += 1) {
+    const prevLeft = leftPoints[index - 1]
+    const prevRight = rightPoints[index - 1]
+    const nextLeft = leftPoints[index]
+    const nextRight = rightPoints[index]
+    const quad = [
+      [-prevLeft.y, 0.018, -prevLeft.x],
+      [-prevRight.y, 0.018, -prevRight.x],
+      [-nextRight.y, 0.018, -nextRight.x],
+      [-prevLeft.y, 0.018, -prevLeft.x],
+      [-nextRight.y, 0.018, -nextRight.x],
+      [-nextLeft.y, 0.018, -nextLeft.x],
+    ]
+    positions.push(...quad.flat())
+  }
+
+  const geometry = new THREE.BufferGeometry()
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
+  geometry.computeVertexNormals()
+  return new THREE.Mesh(
+    geometry,
+    new THREE.MeshStandardMaterial({
+      color: 0x333334,
+      roughness: 0.94,
+      metalness: 0.08,
+    }),
+  )
+}
+
+function createCurbGroup(boundary, outwardSign) {
+  if (!Array.isArray(boundary?.points) || boundary.kind !== 'curb' || boundary.points.length < 2) {
+    return null
+  }
+
+  const group = new THREE.Group()
+  const material = new THREE.MeshStandardMaterial({
+    color: 0xdfe2e6,
+    roughness: 0.82,
+    metalness: 0.06,
+  })
+
+  for (let index = 1; index < boundary.points.length; index += 2) {
+    const prev = boundary.points[index - 1]
+    const next = boundary.points[index]
+    const dx = next.x - prev.x
+    const dy = next.y - prev.y
+    const length = Math.hypot(dx, dy)
+    if (length < 0.8) {
+      continue
+    }
+
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.16, length), material)
+    const midX = (prev.x + next.x) * 0.5
+    const midY = (prev.y + next.y) * 0.5 + outwardSign * 0.12
+    mesh.position.set(-midY, 0.09, -midX)
+    mesh.rotation.y = Math.atan2(-dy, dx)
+    mesh.castShadow = true
+    mesh.receiveShadow = true
+    group.add(mesh)
+  }
+
+  return group
+}
+
 function createEgoVehicle() {
   const group = new THREE.Group()
   const bodyMaterial = new THREE.MeshStandardMaterial({
@@ -250,6 +343,12 @@ export class SRSceneEngine {
       disposeNode(child)
     }
 
+    const roadSurface = createRoadSurfaceMesh(lanes)
+    if (roadSurface) {
+      roadSurface.receiveShadow = true
+      this.laneGroup.add(roadSurface)
+    }
+
     const corridorMesh = createCorridorMesh(lanes?.corridor)
     if (corridorMesh) {
       this.laneGroup.add(corridorMesh)
@@ -262,8 +361,26 @@ export class SRSceneEngine {
 
     const boundaries = Array.isArray(lanes?.boundaries) ? lanes.boundaries : []
     boundaries.forEach((lane) => {
-      this.laneGroup.add(createLaneLine(lane.points, 0x4f6b84, false))
+      const color = lane.kind === 'curb' ? 0xf0f2f5 : 0x4f6b84
+      this.laneGroup.add(createLaneLine(lane.points, color, false))
     })
+
+    const leftBoundary = boundaries
+      .filter((lane) => averageLaneOffset(lane) >= 0)
+      .sort((left, right) => averageLaneOffset(right) - averageLaneOffset(left))[0]
+    const rightBoundary = boundaries
+      .filter((lane) => averageLaneOffset(lane) <= 0)
+      .sort((left, right) => averageLaneOffset(left) - averageLaneOffset(right))[0]
+
+    const leftCurb = createCurbGroup(leftBoundary, 1)
+    if (leftCurb) {
+      this.laneGroup.add(leftCurb)
+    }
+
+    const rightCurb = createCurbGroup(rightBoundary, -1)
+    if (rightCurb) {
+      this.laneGroup.add(rightCurb)
+    }
   }
 
   setScenePacket(scenePacket) {

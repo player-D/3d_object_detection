@@ -32,7 +32,7 @@ class HungarianMatcher(nn.Module):
             cost_cls = -cls_prob[:, gt_labels]
             
             # 回归成本归一化 + 裁剪
-            bbox_norm = torch.tensor([1.0, 1.0, 1.0, 0.1, 0.1, 0.1, 1.0, 1.0, 0.1, 0.1],
+            bbox_norm = torch.tensor([0.05, 0.05, 0.05, 0.1, 0.1, 0.1, 1.0, 1.0, 0.1, 0.1],
                                    device=bbox_preds.device, dtype=torch.float32)
             
             cost_bbox = torch.cdist(
@@ -124,7 +124,7 @@ class TDRLoss(nn.Module):
                 matched_preds = bbox_pred[pred_indices]
                 matched_gts = gt_bboxes[gt_indices]
                 
-                bbox_norm = torch.tensor([1.0, 1.0, 1.0, 0.1, 0.1, 0.1, 1.0, 1.0, 0.1, 0.1],
+                bbox_norm = torch.tensor([0.05, 0.05, 0.05, 0.1, 0.1, 0.1, 1.0, 1.0, 0.1, 0.1],
                                        device=matched_preds.device, dtype=torch.float32)
                 loss_bbox_batch = (self.l1_loss(matched_preds / bbox_norm,
                                                matched_gts / bbox_norm)).mean()

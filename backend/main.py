@@ -36,10 +36,29 @@ async def lifespan(app: FastAPI):
     
     # 加载模型
     try:
-        model = load_model(device)
+        # 使用硬编码路径，与 inference.py 保持一致
+        checkpoint_path = './saved_models/04_10_10-21/best_model.pth'
+        # 自动从 checkpoint 目录读取 sample_indices.json
+        checkpoint_dir = os.path.dirname(checkpoint_path)
+        sample_indices_path = os.path.join(checkpoint_dir, 'sample_indices.json')
+        
+        model = load_model(device, checkpoint_path=checkpoint_path)
+        
+        # 加载样本索引
+        try:
+            from dataloaders.nuscenes_dataset import NuScenesDataset
+            indices_data = NuScenesDataset.load_sample_indices(sample_indices_path)
+            app.state.sample_indices = indices_data['indices']
+            app.state.sample_pool_size = len(indices_data['indices'])
+            print(f"Loaded sample indices from: {sample_indices_path}")
+            print(f"Sample pool size: {app.state.sample_pool_size}")
+        except Exception as e:
+            print(f"Warning: Failed to load sample indices: {e}")
+            app.state.sample_indices = None
+            app.state.sample_pool_size = None
     except Exception as e:
         print(f"加载模型失败: {e}")
-        print("提示：请确保 ./saved_models/best_model.pth 存在，或修改main.py中的checkpoint路径")
+        print(f"提示：请确保 {checkpoint_path} 存在，或修改main.py中的checkpoint路径")
         sys.exit(1)
     
     # 加载数据集
@@ -65,6 +84,7 @@ async def lifespan(app: FastAPI):
     app.state.dataset = dataset
     app.state.device = device
     app.state.dataset_size = len(dataset)
+    app.state.sample_pool_size = app.state.sample_pool_size if getattr(app.state, 'sample_pool_size', None) else len(dataset)
     
     print("模型和数据集加载完成！")
     
@@ -104,6 +124,7 @@ class PredictResponse(BaseModel):
     image_bev: str
     image_sr_gt: str
     image_sr_pred: str
+    image_front: str
     scene_stream: dict
     stats: dict
 
@@ -121,12 +142,16 @@ async def predict(request: PredictRequest):
     start_time = time.time()
     
     # 选择样本
+    sample_indices = app.state.sample_indices if hasattr(app.state, 'sample_indices') and app.state.sample_indices else list(range(len(dataset)))
+    sample_pool_size = app.state.sample_pool_size if hasattr(app.state, 'sample_pool_size') else len(dataset)
+    
     if request.mode == "specific":
-        if request.sample_index < 0 or request.sample_index >= len(dataset):
-            raise HTTPException(status_code=400, detail=f"样本索引超出范围: {request.sample_index}")
-        candidate_indices = [request.sample_index]
+        if request.sample_index < 0 or request.sample_index >= sample_pool_size:
+            raise HTTPException(status_code=400, detail=f"样本索引超出范围: {request.sample_index} (可用范围: 0-{sample_pool_size-1})")
+        actual_index = sample_indices[request.sample_index] if request.sample_index < len(sample_indices) else request.sample_index
+        candidate_indices = [actual_index]
     else:
-        candidate_indices = list(range(len(dataset)))
+        candidate_indices = sample_indices
         random.shuffle(candidate_indices)
 
     images = boxes_2d = cam_intrinsics = cam_extrinsics = gt_bboxes = gt_labels = None
@@ -173,7 +198,7 @@ async def predict(request: PredictRequest):
     # 可视化结果
     try:
         # 调用修改后的 visualize 函数，获取五个 NumPy 图像数组和统计信息
-        canvas_combined, canvas_top_pair, bev_img, scene_gt_img, scene_pred_img, stats, scene_stream = visualize(
+        canvas_combined, canvas_top_pair, bev_img, scene_gt_img, scene_pred_img, front_img, stats, scene_stream = visualize(
             images,
             cam_intrinsics,
             gt_bboxes,
@@ -218,36 +243,34 @@ async def predict(request: PredictRequest):
     _, buffer_sr_pred = cv2.imencode('.jpg', scene_pred_img)
     img_sr_pred_b64 = base64.b64encode(buffer_sr_pred).decode('utf-8')
 
-    # 保存结果到 output 目录
-    output_dir = "output"
-    merged_images_dir = os.path.join(output_dir, "merged_images")
-    bev_dir = os.path.join(output_dir, "bev")
-    sr_dir = os.path.join(output_dir, "sr")
-    metrics_dir = os.path.join(output_dir, "metrics")
-    
+    _, buffer_front = cv2.imencode('.jpg', front_img)
+    img_front_b64 = base64.b64encode(buffer_front).decode('utf-8')
+
+    # 保存结果到时间命名的文件夹
+    import datetime
+    current_time = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+    output_dir = os.path.join("output", current_time)
     os.makedirs(output_dir, exist_ok=True)
-    os.makedirs(merged_images_dir, exist_ok=True)
-    os.makedirs(bev_dir, exist_ok=True)
-    os.makedirs(sr_dir, exist_ok=True)
-    os.makedirs(metrics_dir, exist_ok=True)
+    save_debug_visuals = os.environ.get("SAVE_DEBUG_VISUALS", "0").strip().lower() in {"1", "true", "yes", "on"}
     
-    # 保存拼接图
-    combined_output_path = os.path.join(merged_images_dir, f'combined_{sample_token}.jpg')
+    # 保存所有图片到同一个文件夹
+    combined_output_path = os.path.join(output_dir, f'combined_{sample_token}.jpg')
     cv2.imwrite(combined_output_path, canvas_combined)
     
-    # 保存预测图
-    pred_output_path = os.path.join(merged_images_dir, f'top_pair_{sample_token}.jpg')
+    pred_output_path = os.path.join(output_dir, f'top_pair_{sample_token}.jpg')
     cv2.imwrite(pred_output_path, canvas_top_pair)
     
-    # 保存 BEV 图
-    bev_output_path = os.path.join(bev_dir, f'bev_{sample_token}.jpg')
-    cv2.imwrite(bev_output_path, bev_img)
+    if save_debug_visuals:
+        bev_output_path = os.path.join(output_dir, f'bev_{sample_token}.jpg')
+        cv2.imwrite(bev_output_path, bev_img)
 
-    # 保存 SR 参考图
-    sr_gt_output_path = os.path.join(sr_dir, f'sr_gt_{sample_token}.jpg')
-    cv2.imwrite(sr_gt_output_path, scene_gt_img)
-    sr_pred_output_path = os.path.join(sr_dir, f'sr_pred_{sample_token}.jpg')
-    cv2.imwrite(sr_pred_output_path, scene_pred_img)
+        sr_gt_output_path = os.path.join(output_dir, f'sr_gt_{sample_token}.jpg')
+        cv2.imwrite(sr_gt_output_path, scene_gt_img)
+        sr_pred_output_path = os.path.join(output_dir, f'sr_pred_{sample_token}.jpg')
+        cv2.imwrite(sr_pred_output_path, scene_pred_img)
+        
+        front_output_path = os.path.join(output_dir, f'front_{sample_token}.jpg')
+        cv2.imwrite(front_output_path, front_img)
 
     # 返回最终 JSON 响应
     return {
@@ -257,6 +280,7 @@ async def predict(request: PredictRequest):
         "image_bev": f"data:image/jpeg;base64,{img_bev_b64}",
         "image_sr_gt": f"data:image/jpeg;base64,{img_sr_gt_b64}",
         "image_sr_pred": f"data:image/jpeg;base64,{img_sr_pred_b64}",
+        "image_front": f"data:image/jpeg;base64,{img_front_b64}",
         "scene_stream": scene_stream,
         "stats": response_stats
     }
@@ -272,8 +296,9 @@ async def health_check():
     model = app.state.model
     dataset = app.state.dataset
     device = app.state.device
+    sample_pool_size = app.state.sample_pool_size if hasattr(app.state, 'sample_pool_size') else len(dataset)
     if model is not None and dataset is not None:
-        return {"status": "healthy", "model_loaded": True, "dataset_size": len(dataset), "device": str(device)}
+        return {"status": "healthy", "model_loaded": True, "dataset_size": sample_pool_size, "device": str(device)}
     else:
         return {"status": "unhealthy", "model_loaded": model is not None, "dataset_loaded": dataset is not None, "device": str(device)}
 

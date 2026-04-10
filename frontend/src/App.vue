@@ -55,7 +55,7 @@
                 controls-position="right"
                 class="index-input"
               />
-              <div class="input-hint">当前数据池 {{ datasetSize }} 个样本</div>
+              <div class="input-hint">可用范围：0 - {{ Math.max(0, datasetSize - 1) }}（共 {{ datasetSize }} 个样本）</div>
             </el-form-item>
 
             <el-button
@@ -147,7 +147,7 @@
         </section>
 
         <section class="camera-grid">
-          <article class="glass-panel camera-card">
+          <article class="glass-panel camera-card fusion-card">
             <CameraPanel
               title="Camera Fusion"
               subtitle="多视角 GT + Pred 总览"
@@ -156,12 +156,21 @@
             />
           </article>
 
-          <article class="glass-panel camera-card">
+          <article class="glass-panel camera-card focus-card">
             <CameraPanel
               title="Target Focus"
               subtitle="关键目标对焦与原图关联"
               :image-src="imagePred"
               status="Focus Pair"
+            />
+          </article>
+
+          <article class="glass-panel camera-card front-card">
+            <CameraPanel
+              title="Front Camera"
+              subtitle="前视相机原图"
+              :image-src="imageFront"
+              status="Original"
             />
           </article>
         </section>
@@ -193,6 +202,10 @@ const sampleIndex = ref(0)
 const isLoading = ref(false)
 const imageCombined = ref('')
 const imagePred = ref('')
+const imageBev = ref('')
+const imageSrGt = ref('')
+const imageSrPred = ref('')
+const imageFront = ref('')
 const backendStatus = ref(false)
 const deviceType = ref('CPU')
 const datasetSize = ref(0)
@@ -251,6 +264,10 @@ async function startDetection() {
     const data = await requestPrediction(payload)
     imageCombined.value = data.image_combined || ''
     imagePred.value = data.image_pred || ''
+    imageBev.value = data.image_bev || ''
+    imageSrGt.value = data.image_sr_gt || ''
+    imageSrPred.value = data.image_sr_pred || ''
+    imageFront.value = data.image_front || ''
     scenePacket.value = normalizeScenePacket(data.scene_stream)
 
     if (data.stats) {
@@ -569,7 +586,11 @@ onUnmounted(() => {
 .camera-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 18px;
+  gap: 14px;
+}
+
+.fusion-card {
+  grid-column: 1 / -1;
 }
 
 .loading-overlay {

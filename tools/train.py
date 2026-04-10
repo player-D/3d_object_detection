@@ -213,7 +213,6 @@ def main():
                 pos_acc = losses.get('pos_acc', 0)
                 xyz_err = losses.get('xyz_err_m', 0)
                 
-                actual_steps += 1
                 total_loss += loss.item()
                 total_cls_loss += loss_cls.item()
                 total_reg_loss += loss_reg.item()

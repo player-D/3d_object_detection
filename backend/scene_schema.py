@@ -1,6 +1,10 @@
 import math
 
 
+def clamp(value, minimum, maximum):
+    return max(minimum, min(maximum, value))
+
+
 def estimate_ego_speed_mps(nusc, sample_token):
     sample = nusc.get("sample", sample_token)
     prev_token = sample.get("prev")
@@ -53,31 +57,123 @@ def _build_lane(points, lane_id, kind):
     }
 
 
-def build_lane_vectors():
+def _road_shift(x_value, center_offset, curvature):
+    forward = max(0.0, float(x_value) + 8.0)
+    blend = min(1.0, forward / 72.0)
+    return center_offset + curvature * (blend ** 2) * 4.8
+
+
+def _build_offset_lane(longitudinal, offset, center_offset, curvature, lane_id, kind):
+    points = [
+        (x_value, offset + _road_shift(x_value, center_offset, curvature))
+        for x_value in longitudinal
+    ]
+    return _build_lane(points, lane_id, kind)
+
+
+def build_lane_vectors(profile=None):
+    profile = profile or {}
     longitudinal = [float(step) for step in range(-8, 73, 4)]
-    center_points = [(x, 0.0) for x in longitudinal]
-    left_points = [(x, 3.6) for x in longitudinal]
-    right_points = [(x, -3.6) for x in longitudinal]
-    far_left_points = [(x, 7.2) for x in longitudinal]
-    far_right_points = [(x, -7.2) for x in longitudinal]
+    corridor_longitudinal = [float(step) for step in range(0, 67, 3)]
 
-    corridor = []
-    for x in range(0, 65, 3):
-        width = 1.7 + x * 0.055
-        corridor.append((float(x), float(width)))
+    lane_width = clamp(float(profile.get("lane_width", 3.6)), 3.0, 4.4)
+    center_offset = clamp(float(profile.get("center_offset", 0.0)), -4.5, 4.5)
+    curvature = clamp(float(profile.get("curvature", 0.0)), -1.0, 1.0)
 
-    corridor_points = [{"x": x, "left_y": y, "right_y": -y} for x, y in corridor]
+    lane_positions = profile.get("lane_positions")
+    if not lane_positions:
+        lane_positions = [0.0, lane_width, -lane_width]
+    lane_positions = sorted(
+        {
+            round(clamp(float(position), -12.0, 12.0), 2)
+            for position in lane_positions
+        },
+        reverse=True,
+    )
+
+    left_boundary = max(lane_positions) + lane_width
+    right_boundary = min(lane_positions) - lane_width
+
+    if "left_boundary_y" in profile:
+        left_boundary = clamp(float(profile["left_boundary_y"]), 1.8, 12.0)
+    if "right_boundary_y" in profile:
+        right_boundary = clamp(float(profile["right_boundary_y"]), -12.0, -1.8)
+
+    if left_boundary <= max(lane_positions):
+        left_boundary = max(lane_positions) + lane_width * 0.8
+    if right_boundary >= min(lane_positions):
+        right_boundary = min(lane_positions) - lane_width * 0.8
+
+    left_boundary_kind = profile.get("left_boundary_kind", "boundary")
+    right_boundary_kind = profile.get("right_boundary_kind", "boundary")
+    left_shoulder = clamp(float(profile.get("left_shoulder", 0.9)), 0.4, 2.4)
+    right_shoulder = clamp(float(profile.get("right_shoulder", 0.9)), 0.4, 2.4)
+
+    centerlines = []
+    for index, position in enumerate(lane_positions):
+        if abs(position) < lane_width * 0.35:
+            lane_id = "ego-center"
+        elif position > 0:
+            lane_id = f"left-adjacent-{index}"
+        else:
+            lane_id = f"right-adjacent-{index}"
+        centerlines.append(
+            _build_offset_lane(
+                longitudinal=longitudinal,
+                offset=position,
+                center_offset=center_offset,
+                curvature=curvature,
+                lane_id=lane_id,
+                kind="centerline",
+            )
+        )
+
+    boundaries = [
+        _build_offset_lane(
+            longitudinal=longitudinal,
+            offset=left_boundary,
+            center_offset=center_offset,
+            curvature=curvature,
+            lane_id=f"left-{left_boundary_kind}",
+            kind=left_boundary_kind,
+        ),
+        _build_offset_lane(
+            longitudinal=longitudinal,
+            offset=right_boundary,
+            center_offset=center_offset,
+            curvature=curvature,
+            lane_id=f"right-{right_boundary_kind}",
+            kind=right_boundary_kind,
+        ),
+    ]
+
+    corridor_points = []
+    for x_value in corridor_longitudinal:
+        road_shift = _road_shift(x_value, center_offset, curvature)
+        left_y = max(0.8, left_boundary - left_shoulder * 0.35 + road_shift)
+        right_y = min(-0.8, right_boundary + right_shoulder * 0.35 + road_shift)
+        corridor_points.append(
+            {
+                "x": x_value,
+                "left_y": left_y,
+                "right_y": right_y,
+            }
+        )
+
     return {
-        "centerlines": [
-            _build_lane(center_points, "ego-center", "centerline"),
-            _build_lane(left_points, "adjacent-left", "centerline"),
-            _build_lane(right_points, "adjacent-right", "centerline"),
-        ],
-        "boundaries": [
-            _build_lane(far_left_points, "left-boundary", "boundary"),
-            _build_lane(far_right_points, "right-boundary", "boundary"),
-        ],
+        "centerlines": centerlines,
+        "boundaries": boundaries,
         "corridor": corridor_points,
+        "meta": {
+            "source": profile.get("source", "default"),
+            "lane_width": lane_width,
+            "lane_count": len(lane_positions),
+            "left_boundary_kind": left_boundary_kind,
+            "right_boundary_kind": right_boundary_kind,
+            "left_shoulder": left_shoulder,
+            "right_shoulder": right_shoulder,
+            "curvature": curvature,
+        },
     }
 
 
@@ -107,7 +203,7 @@ def _serialize_object(object_id, source, cls_name, box, score, label):
     }
 
 
-def build_scene_stream(sample_token, sample_timestamp, nusc, gt_items, pred_items):
+def build_scene_stream(sample_token, sample_timestamp, nusc, gt_items, pred_items, lane_profile=None):
     ego_speed_mps = estimate_ego_speed_mps(nusc, sample_token)
     ego_speed_kph = ego_speed_mps * 3.6
 
@@ -159,7 +255,7 @@ def build_scene_stream(sample_token, sample_timestamp, nusc, gt_items, pred_item
             },
             "threat_level": "low",
         },
-        "lanes": build_lane_vectors(),
+        "lanes": build_lane_vectors(lane_profile),
         "objects": objects,
         "summary": {
             "gt_count": sum(1 for obj in objects if obj["source"] == "gt"),

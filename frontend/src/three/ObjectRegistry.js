@@ -92,29 +92,102 @@ function createVehicleModel(size, palette) {
   }
 }
 
+function createSU7Model(size, palette) {
+  const group = new THREE.Group()
+  const bodyMaterial = createMaterial(palette.body, { metalness: 0.72, roughness: 0.24, emissive: palette.emissive, emissiveIntensity: 0.22 })
+  const glassMaterial = createMaterial(palette.cabin, { metalness: 0.18, roughness: 0.12, emissive: palette.emissive, emissiveIntensity: 0.12 })
+  const trimMaterial = createMaterial(palette.trim, { metalness: 0.2, roughness: 0.58 })
+  const lightMaterial = createMaterial(0xcaf2ff, { metalness: 0.05, roughness: 0.22, emissive: 0x7dcfff, emissiveIntensity: 0.38 })
+
+  const length = clamp(size.length, 4.7, 5.25)
+  const width = clamp(size.width, 1.88, 2.08)
+  const height = clamp(size.height, 1.35, 1.55)
+
+  const lowerBody = createBoxMesh(new THREE.Vector3(width * 0.96, height * 0.32, length * 0.92), bodyMaterial)
+  lowerBody.position.y = height * 0.24
+  group.add(lowerBody)
+
+  const midBody = createBoxMesh(new THREE.Vector3(width * 0.92, height * 0.2, length * 0.74), bodyMaterial)
+  midBody.position.y = height * 0.4
+  midBody.position.z = -length * 0.03
+  group.add(midBody)
+
+  const cabin = createBoxMesh(new THREE.Vector3(width * 0.72, height * 0.24, length * 0.38), glassMaterial)
+  cabin.position.set(0, height * 0.64, -length * 0.02)
+  group.add(cabin)
+
+  const hood = createBoxMesh(new THREE.Vector3(width * 0.8, height * 0.1, length * 0.24), trimMaterial)
+  hood.position.set(0, height * 0.48, -length * 0.29)
+  hood.rotation.x = -0.18
+  group.add(hood)
+
+  const fastback = createBoxMesh(new THREE.Vector3(width * 0.7, height * 0.08, length * 0.22), trimMaterial)
+  fastback.position.set(0, height * 0.58, length * 0.2)
+  fastback.rotation.x = 0.22
+  group.add(fastback)
+
+  const frontLight = createBoxMesh(new THREE.Vector3(width * 0.66, 0.05, 0.08), lightMaterial)
+  frontLight.position.set(0, height * 0.35, -length * 0.46)
+  group.add(frontLight)
+
+  const rearLight = createBoxMesh(new THREE.Vector3(width * 0.72, 0.05, 0.08), lightMaterial)
+  rearLight.position.set(0, height * 0.35, length * 0.44)
+  group.add(rearLight)
+
+  const wheelMaterial = createMaterial(0x10141f, { metalness: 0.08, roughness: 0.88 })
+  const wheelGeometry = new THREE.CylinderGeometry(width * 0.12, width * 0.12, width * 0.12, 18)
+  wheelGeometry.rotateZ(Math.PI / 2)
+  const wheelOffsets = [
+    [-width * 0.42, height * 0.11, -length * 0.28],
+    [width * 0.42, height * 0.11, -length * 0.28],
+    [-width * 0.42, height * 0.11, length * 0.24],
+    [width * 0.42, height * 0.11, length * 0.24],
+  ]
+  wheelOffsets.forEach(([x, y, z]) => {
+    const wheel = new THREE.Mesh(wheelGeometry, wheelMaterial)
+    wheel.position.set(x, y, z)
+    wheel.castShadow = true
+    wheel.receiveShadow = true
+    group.add(wheel)
+  })
+
+  return {
+    root: group,
+    materials: [bodyMaterial, glassMaterial, trimMaterial, lightMaterial, wheelMaterial],
+  }
+}
+
 function createPedestrianModel(size, palette) {
   const group = new THREE.Group()
   const bodyMaterial = createMaterial(palette.body, { metalness: 0.1, roughness: 0.65, emissive: palette.emissive, emissiveIntensity: 0.12 })
   const accentMaterial = createMaterial(palette.trim, { metalness: 0.1, roughness: 0.55 })
   const height = clamp(size.height, 1.4, 2.1)
 
-  const torso = createBoxMesh(new THREE.Vector3(0.42, height * 0.42, 0.26), bodyMaterial)
-  torso.position.y = height * 0.53
+  const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.16, height * 0.42, 6, 12), bodyMaterial)
+  torso.position.y = height * 0.5
+  torso.castShadow = true
+  torso.receiveShadow = true
   group.add(torso)
 
-  const hips = createBoxMesh(new THREE.Vector3(0.38, height * 0.14, 0.24), accentMaterial)
+  const hips = createBoxMesh(new THREE.Vector3(0.34, height * 0.12, 0.22), accentMaterial)
   hips.position.y = height * 0.3
   group.add(hips)
 
-  const head = createBoxMesh(new THREE.Vector3(0.24, 0.24, 0.24), bodyMaterial)
-  head.position.y = height * 0.86
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.14, 18, 16), bodyMaterial)
+  head.position.y = height * 0.87
+  head.castShadow = true
+  head.receiveShadow = true
   group.add(head)
 
-  const leftLeg = createBoxMesh(new THREE.Vector3(0.12, height * 0.34, 0.12), accentMaterial)
+  const shoulder = createBoxMesh(new THREE.Vector3(0.44, 0.08, 0.18), accentMaterial)
+  shoulder.position.y = height * 0.63
+  group.add(shoulder)
+
+  const leftLeg = createBoxMesh(new THREE.Vector3(0.1, height * 0.34, 0.1), accentMaterial)
   leftLeg.position.set(-0.08, height * 0.12, 0)
   group.add(leftLeg)
 
-  const rightLeg = createBoxMesh(new THREE.Vector3(0.12, height * 0.34, 0.12), accentMaterial)
+  const rightLeg = createBoxMesh(new THREE.Vector3(0.1, height * 0.34, 0.1), accentMaterial)
   rightLeg.position.set(0.08, height * 0.12, 0)
   group.add(rightLeg)
 
@@ -176,7 +249,10 @@ function createSemanticModel(objectData) {
     ? { body: 0x46d98a, cabin: 0x96f5c0, trim: 0x173d2d, emissive: 0x0b3b25 }
     : { body: 0x7ecbff, cabin: 0xddefff, trim: 0x244a74, emissive: 0x0e2b52 }
 
-  if (['car', 'truck', 'bus', 'trailer', 'construction_vehicle'].includes(objectData.class)) {
+  if (objectData.class === 'car') {
+    return createSU7Model(objectData.box3d.size, palette)
+  }
+  if (['truck', 'bus', 'trailer', 'construction_vehicle'].includes(objectData.class)) {
     return createVehicleModel(objectData.box3d.size, palette)
   }
   if (['pedestrian', 'bicycle', 'motorcycle'].includes(objectData.class)) {
