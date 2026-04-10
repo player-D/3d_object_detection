@@ -20,10 +20,10 @@
 ## 2. 环境安装
 
 ```bash
-pip install -r requirements_gpu.txt
-# 或
-pip install -r requirements_cpu.txt
+pip install -r requirements.txt
 ```
+
+PyTorch 会根据系统自动选择 CPU 或 CUDA 版本。
 
 前端：
 
@@ -80,30 +80,24 @@ python tools/train.py --load_indices saved_models/<run_id>/sample_indices.json
 
 ## 5. 推理（CLI）
 
-### 默认随机（完整数据池）
+### 简化版推理（推荐）
 
 ```bash
-python tools/inference.py \
-  --data_root ./dataset \
-  --nuscenes_version v1.0-mini \
-  --num_samples 2
+python tools/inference.py
 ```
 
-### 只在训练索引池推理
+默认配置：
+- 模型路径：`./saved_models/04_08_17-18/tdr_qaf_epoch_50.pth`
+- 样本索引：`./saved_models/04_08_17-18/sample_indices.json`
+- 推理样本数：2
+- 置信度阈值：0.05
+- 最大预测框数：50
 
-```bash
-python tools/inference.py \
-  --load_indices saved_models/<run_id>/sample_indices.json \
-  --num_samples 2
-```
+如需修改路径，请编辑 `tools/inference.py` 第592-596行。
 
-### 常用参数
-- `--confidence`：置信度阈值（默认 `0.05`）。
-- `--topk`：最多保留预测框数（默认 `50`）。
-- `--max_samples`：限制数据池大小（默认 `None`）。
-- `--num_samples`：本次命令推理样本数。
-- `--data_root`：NuScenes 根目录。
-- `--nuscenes_version`：`v1.0-mini` 或 `v1.0-trainval`。
+### 自定义推理（旧版参数）
+
+如需自定义参数，请恢复 `tools/inference.py` 中的 argparse 参数部分。
 
 ## 6. 后端与前端
 
@@ -155,3 +149,34 @@ npm run dev
 
 - 当前仓库有未完成 merge 状态（`UU`），这是 Git 索引状态问题，不等于代码不可运行。
 - 如果你只看运行效果，优先按本 README 的训练/推理命令执行。
+
+## 9. Mini-50 Training (v1.0-mini only 50 samples)
+
+如果你只想在 `v1.0-mini` 上快速训练 50 个样本，直接用下面命令：
+
+```bash
+python tools/train.py \
+  --data_root ./dataset \
+  --nuscenes_version v1.0-mini \
+  --max_samples 50 \
+  --batch_size 2 \
+  --num_workers 0 \
+  --epochs 20
+```
+
+关键点：
+- `--max_samples 50` 会把训练样本池限制为 50。
+- 训练会自动保存这 50 个样本的索引到 `saved_models/<run_id>/sample_indices.json`。
+- 若要复现实验，后续训练可加：`--load_indices saved_models/<run_id>/sample_indices.json`。
+
+## Visualization Outputs
+
+Each sample now saves 3 images:
+- `combined_<sample_token>.jpg`: GT + Pred 3D projection across six cameras.
+- `top_pair_<sample_token>.jpg`: split focus panel (top: GT/Pred focus, bottom: original image).
+- `bev_<sample_token>.jpg`: stylized BEV image (ego + lane carpet + GT/Pred objects).
+
+Backend API fields:
+- `image_combined`
+- `image_pred`
+- `image_bev`

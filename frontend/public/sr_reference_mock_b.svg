@@ -1,0 +1,24 @@
+<svg width="1280" height="720" viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg2" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#f3f5f9"/>
+      <stop offset="100%" stop-color="#dce3ef"/>
+    </linearGradient>
+    <linearGradient id="road" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#8ca2c7"/>
+      <stop offset="100%" stop-color="#52698f"/>
+    </linearGradient>
+  </defs>
+  <rect width="1280" height="720" fill="url(#bg2)"/>
+  <rect x="120" y="70" width="1040" height="580" rx="36" fill="#ffffff" stroke="#cfdaf0" stroke-width="6"/>
+  <path d="M360 580 C390 340, 890 340, 920 580 L840 580 C820 430,460 430,440 580 Z" fill="url(#road)"/>
+  <line x1="640" y1="580" x2="640" y2="380" stroke="#f1f4fb" stroke-width="6" stroke-dasharray="16 14"/>
+  <line x1="540" y1="580" x2="540" y2="400" stroke="#e7edf8" stroke-width="4"/>
+  <line x1="740" y1="580" x2="740" y2="400" stroke="#e7edf8" stroke-width="4"/>
+  <rect x="605" y="520" width="70" height="54" rx="8" fill="#404854"/>
+  <rect x="730" y="460" width="62" height="45" rx="7" fill="#d2d8e1"/>
+  <rect x="495" y="442" width="58" height="42" rx="7" fill="#d2d8e1"/>
+  <ellipse cx="860" cy="410" rx="17" ry="31" fill="#88cfe0"/>
+  <ellipse cx="430" cy="392" rx="13" ry="24" fill="#f4b269"/>
+  <text x="146" y="58" font-size="30" font-family="Arial" fill="#4d6287">SR Reference B</text>
+</svg>

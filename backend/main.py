@@ -102,6 +102,9 @@ class PredictResponse(BaseModel):
     image_combined: str
     image_pred: str
     image_bev: str
+    image_sr_gt: str
+    image_sr_pred: str
+    scene_stream: dict
     stats: dict
 
 # 核心预测接口
@@ -169,8 +172,8 @@ async def predict(request: PredictRequest):
     
     # 可视化结果
     try:
-        # 调用修改后的 visualize 函数，获取三个 NumPy 图像数组和统计信息
-        canvas_combined, canvas_top_pair, bev_img, stats = visualize(
+        # 调用修改后的 visualize 函数，获取五个 NumPy 图像数组和统计信息
+        canvas_combined, canvas_top_pair, bev_img, scene_gt_img, scene_pred_img, stats, scene_stream = visualize(
             images,
             cam_intrinsics,
             gt_bboxes,
@@ -199,7 +202,7 @@ async def predict(request: PredictRequest):
         "sample_index": index
     }
     
-    # 编码三张图
+    # 编码五张图
     _, buffer_combined = cv2.imencode('.jpg', canvas_combined)
     img_combined_b64 = base64.b64encode(buffer_combined).decode('utf-8')
 
@@ -209,15 +212,23 @@ async def predict(request: PredictRequest):
     _, buffer_bev = cv2.imencode('.jpg', bev_img)
     img_bev_b64 = base64.b64encode(buffer_bev).decode('utf-8')
 
+    _, buffer_sr_gt = cv2.imencode('.jpg', scene_gt_img)
+    img_sr_gt_b64 = base64.b64encode(buffer_sr_gt).decode('utf-8')
+
+    _, buffer_sr_pred = cv2.imencode('.jpg', scene_pred_img)
+    img_sr_pred_b64 = base64.b64encode(buffer_sr_pred).decode('utf-8')
+
     # 保存结果到 output 目录
     output_dir = "output"
     merged_images_dir = os.path.join(output_dir, "merged_images")
     bev_dir = os.path.join(output_dir, "bev")
+    sr_dir = os.path.join(output_dir, "sr")
     metrics_dir = os.path.join(output_dir, "metrics")
     
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(merged_images_dir, exist_ok=True)
     os.makedirs(bev_dir, exist_ok=True)
+    os.makedirs(sr_dir, exist_ok=True)
     os.makedirs(metrics_dir, exist_ok=True)
     
     # 保存拼接图
@@ -232,12 +243,21 @@ async def predict(request: PredictRequest):
     bev_output_path = os.path.join(bev_dir, f'bev_{sample_token}.jpg')
     cv2.imwrite(bev_output_path, bev_img)
 
+    # 保存 SR 参考图
+    sr_gt_output_path = os.path.join(sr_dir, f'sr_gt_{sample_token}.jpg')
+    cv2.imwrite(sr_gt_output_path, scene_gt_img)
+    sr_pred_output_path = os.path.join(sr_dir, f'sr_pred_{sample_token}.jpg')
+    cv2.imwrite(sr_pred_output_path, scene_pred_img)
+
     # 返回最终 JSON 响应
     return {
         "status": "success",
         "image_combined": f"data:image/jpeg;base64,{img_combined_b64}",
         "image_pred": f"data:image/jpeg;base64,{img_pred_b64}",
         "image_bev": f"data:image/jpeg;base64,{img_bev_b64}",
+        "image_sr_gt": f"data:image/jpeg;base64,{img_sr_gt_b64}",
+        "image_sr_pred": f"data:image/jpeg;base64,{img_sr_pred_b64}",
+        "scene_stream": scene_stream,
         "stats": response_stats
     }
 
