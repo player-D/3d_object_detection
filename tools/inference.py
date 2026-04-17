@@ -24,6 +24,9 @@ from nuscenes.utils.data_classes import Box
 from nuscenes.utils.geometry_utils import view_points
 from pyquaternion import Quaternion
 
+def clamp(x, min_val, max_val):
+    return max(min_val, min(x, max_val))
+
 CAMERA_NAMES = [
     'CAM_FRONT',
     'CAM_FRONT_RIGHT',
