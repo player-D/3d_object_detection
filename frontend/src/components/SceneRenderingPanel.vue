@@ -204,14 +204,14 @@ onUnmounted(() => {
   top: 92px;
   left: 50%;
   transform: translateX(-50%);
-  min-width: 280px;
-  padding: 12px 18px;
+  min-width: 260px;
+  padding: 10px 16px;
   border-radius: 999px;
   background: rgba(8, 18, 30, 0.44);
   border: 1px solid rgba(143, 177, 206, 0.16);
   backdrop-filter: blur(14px);
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: 12px;
   text-align: center;
 }
 
@@ -224,10 +224,10 @@ onUnmounted(() => {
 }
 
 .label-card {
-  min-width: 108px;
-  padding: 10px 12px;
-  border-radius: 16px;
-  background: rgba(7, 16, 28, 0.78);
+  min-width: 96px;
+  padding: 9px 10px;
+  border-radius: 14px;
+  background: rgba(7, 16, 28, 0.72);
   border: 1px solid rgba(143, 177, 206, 0.18);
   box-shadow: 0 10px 28px rgba(0, 0, 0, 0.28);
   text-align: center;
@@ -244,7 +244,7 @@ onUnmounted(() => {
 
 .label-card strong {
   display: block;
-  font-size: 14px;
+  font-size: 13px;
   color: #f2f7fb;
 }
 

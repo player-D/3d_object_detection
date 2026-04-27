@@ -23,8 +23,8 @@
       </div>
 
       <div class="summary-card">
-        <span>单图叠加对照</span>
-        <strong>更适合量产调试，图例直接区分 GT / Pred</strong>
+        <span>在线简化视图</span>
+        <strong>只保留近距离关键目标，减少页面噪声</strong>
       </div>
     </div>
   </div>
@@ -324,11 +324,40 @@ function drawObject(ctx, objectItem, width, height, labelAnchorY = null, showLab
 
   if (showLabel) {
     ctx.fillStyle = objectItem.source === 'gt' ? '#9df3c7' : '#eff7ff'
-    ctx.font = '12px Bahnschrift, Segoe UI, sans-serif'
+    ctx.font = '11px Bahnschrift, Segoe UI, sans-serif'
     const labelY = labelAnchorY ?? center.y - 8
     ctx.fillText(objectItem.label, center.x + 8, labelY)
   }
   ctx.restore()
+}
+
+function distanceRank(objectItem) {
+  const center = objectItem?.box3d?.center
+  if (!center) {
+    return Number.POSITIVE_INFINITY
+  }
+  return Math.hypot(center.x || 0, center.y || 0)
+}
+
+function buildDisplayObjects(scene) {
+  const objects = Array.isArray(scene?.objects) ? scene.objects.slice() : []
+  const gtObjects = objects
+    .filter((objectItem) => objectItem.source === 'gt' && distanceRank(objectItem) <= 20)
+    .sort((left, right) => distanceRank(left) - distanceRank(right))
+    .slice(0, 4)
+  const predObjects = objects
+    .filter((objectItem) => objectItem.source === 'pred' && distanceRank(objectItem) <= 34)
+    .sort((left, right) => {
+      const threatWeight = { high: 3, medium: 2, low: 1 }
+      const threatGap = (threatWeight[right.threat_level] || 0) - (threatWeight[left.threat_level] || 0)
+      if (threatGap !== 0) {
+        return threatGap
+      }
+      return distanceRank(left) - distanceRank(right)
+    })
+    .slice(0, 10)
+
+  return [...gtObjects, ...predObjects]
 }
 
 function drawEgo(ctx, ego, width, height) {
@@ -368,8 +397,8 @@ function render() {
   ctx.clearRect(0, 0, width, height)
 
   const gradient = ctx.createLinearGradient(0, 0, 0, height)
-  gradient.addColorStop(0, '#0f1f31')
-  gradient.addColorStop(1, '#09131f')
+  gradient.addColorStop(0, '#102031')
+  gradient.addColorStop(1, '#0a1420')
   ctx.fillStyle = gradient
   ctx.fillRect(0, 0, width, height)
 
@@ -383,8 +412,7 @@ function render() {
   const labelRows = []
   let gtLabels = 0
   let predLabels = 0
-  ;(props.scene?.objects || [])
-    .slice()
+  buildDisplayObjects(props.scene)
     .sort((left, right) => {
       const leftRank = left.source === 'pred' ? 1 : 0
       const rightRank = right.source === 'pred' ? 1 : 0
@@ -400,8 +428,8 @@ function render() {
         labelY -= 16
       }
       const allowLabel = objectItem.source === 'pred'
-        ? predLabels < 8 && (objectItem.threat_level !== 'low' || objectItem.box3d.center.x < 22)
-        : gtLabels < 4 && objectItem.box3d.center.x < 18
+        ? predLabels < 4 && objectItem.threat_level !== 'low' && objectItem.box3d.center.x < 24
+        : gtLabels < 2 && objectItem.box3d.center.x < 16
       drawObject(ctx, objectItem, width, height, labelY, allowLabel)
       if (allowLabel) {
         labelRows.push(labelY)

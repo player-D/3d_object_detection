@@ -4,7 +4,7 @@
       <div class="brand-block">
         <div class="brand-kicker">Autonomous Perception Workbench</div>
         <h1>TDR-QAF 3D Detection + Scene Rendering</h1>
-        <p>以统一场景数据包驱动 SR、BEV 与相机结果，而不是继续堆静态截图。</p>
+        <p>统一展示 SR、BEV、相机调试图与论文插图输出，调试视图与论文视图分层呈现。</p>
       </div>
 
       <div class="topbar-status">
@@ -55,7 +55,9 @@
                 controls-position="right"
                 class="index-input"
               />
-              <div class="input-hint">可用范围：0 - {{ Math.max(0, datasetSize - 1) }}（共 {{ datasetSize }} 个样本）</div>
+              <div class="input-hint">
+                可用范围：0 - {{ Math.max(0, datasetSize - 1) }}（共 {{ datasetSize }} 个样本）
+              </div>
             </el-form-item>
 
             <el-button
@@ -65,7 +67,7 @@
               :disabled="!backendStatus"
               @click="startDetection"
             >
-              开始推理并刷新 SR
+              开始推理并刷新结果
             </el-button>
           </el-form>
         </section>
@@ -115,7 +117,7 @@
               <strong>{{ item.count }}</strong>
             </div>
             <div v-if="predBreakdown.length === 0" class="empty-breakdown">
-              当前预测为空，SR 仅保留自车与车道。
+              当前预测为空，页面仅保留道路结构与自车场景。
             </div>
           </div>
         </section>
@@ -128,7 +130,7 @@
               <div>
                 <p class="eyebrow">Scene Rendering</p>
                 <h2>量产风格 SR 主视图</h2>
-                <p class="section-copy">Three.js 实时渲染，自车高亮、目标平滑插值、3D 投影标签与风险波纹全部在前端完成。</p>
+                <p class="section-copy">前端 Three.js 渲染的主场景视图，保留实时感知信息，但减少论文插图不需要的噪声。</p>
               </div>
             </div>
             <SceneRenderingPanel :scene="scenePacket" />
@@ -138,8 +140,8 @@
             <div class="section-heading">
               <div>
                 <p class="eyebrow">Bird Eye View</p>
-                <h2>单图叠加式 BEV</h2>
-                <p class="section-copy">这里我选一张图叠加 GT 与 Pred，并配清晰图例。工程调试时比拆两张来回对照更高效。</p>
+                <h2>在线简化 BEV</h2>
+                <p class="section-copy">用于页面在线查看的简化 BEV，强调道路结构、风险目标与自车相对位置。</p>
               </div>
             </div>
             <BevPanel :scene="scenePacket" />
@@ -150,58 +152,68 @@
           <article class="glass-panel camera-card fusion-card">
             <CameraPanel
               title="Camera Fusion"
-              subtitle="多视角 GT + Pred 总览"
+              subtitle="多视角 GT + Pred 调试总览"
               :image-src="imageCombined"
-              status="GT + Pred"
+              status="调试图"
             />
           </article>
 
           <article class="glass-panel camera-card focus-card">
             <CameraPanel
               title="Target Focus"
-              subtitle="关键目标对焦与原图关联"
+              subtitle="关键目标局部对焦与原图对应关系"
               :image-src="imagePred"
-              status="Focus Pair"
+              status="调试图"
             />
           </article>
 
           <article class="glass-panel camera-card front-card">
             <CameraPanel
               title="Front Camera"
-              subtitle="前视相机原图"
+              subtitle="前视相机增强原图"
               :image-src="imageFront"
-              status="Original"
+              status="参考图"
             />
           </article>
         </section>
 
-        <section class="review-grid">
-          <article class="glass-panel camera-card">
-            <CameraPanel
-              title="Backend SR"
-              subtitle="Prediction render from backend"
-              :image-src="imageSrPred"
-              status="Pred SR"
-            />
-          </article>
+        <section class="paper-section glass-panel">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Paper Export</p>
+              <h2>论文插图输出</h2>
+              <p class="section-copy">这一组图尽量控制信息密度，适合作为本节结果展示直接放入论文。</p>
+            </div>
+          </div>
 
-          <article class="glass-panel camera-card">
-            <CameraPanel
-              title="Backend SR"
-              subtitle="Ground truth render from backend"
-              :image-src="imageSrGt"
-              status="GT SR"
-            />
-          </article>
+          <div class="paper-grid">
+            <article class="camera-card paper-card">
+              <CameraPanel
+                title="Paper Figure A"
+                subtitle="预测结果主图与重点目标局部细节"
+                :image-src="imageSrPred"
+                status="论文图"
+              />
+            </article>
 
-          <article class="glass-panel camera-card">
-            <CameraPanel
-              title="Backend BEV"
-              subtitle="Rendered BEV verification image"
-              :image-src="imageBev"
-              status="BEV"
-            />
-          </article>
+            <article class="camera-card paper-card">
+              <CameraPanel
+                title="Paper Figure B"
+                subtitle="真值结果主图与重点目标局部细节"
+                :image-src="imageSrGt"
+                status="论文图"
+              />
+            </article>
+
+            <article class="camera-card paper-card">
+              <CameraPanel
+                title="Paper Figure C"
+                subtitle="简化 BEV 对比图"
+                :image-src="imageBev"
+                status="论文图"
+              />
+            </article>
+          </div>
         </section>
       </main>
     </div>
@@ -220,8 +232,8 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { ElMessageBox, ElNotification } from 'element-plus'
 
 import { fetchHealth, requestPrediction } from './api/client'
-import CameraPanel from './components/CameraPanel.vue'
 import BevPanel from './components/BevPanel.vue'
+import CameraPanel from './components/CameraPanel.vue'
 import SceneRenderingPanel from './components/SceneRenderingPanel.vue'
 import { createFallbackScenePacket, formatClassLabel, normalizeScenePacket } from './data/scenePacket'
 
@@ -309,7 +321,7 @@ async function startDetection() {
 
     ElNotification({
       title: '场景已更新',
-      message: detectionCount.value > 0 ? 'SR、BEV 与相机结果已同步刷新。' : '当前样本没有预测目标，已保留稳定 SR 基础场景。',
+      message: detectionCount.value > 0 ? 'SR、BEV 和论文插图已同步刷新。' : '当前样本没有有效预测目标，已保留基础场景。',
       type: 'success',
       duration: 2600,
     })
@@ -454,7 +466,8 @@ onUnmounted(() => {
 .insight-panel,
 .sr-card,
 .bev-card,
-.camera-card {
+.camera-card,
+.paper-section {
   padding: 22px;
 }
 
@@ -618,7 +631,7 @@ onUnmounted(() => {
   gap: 14px;
 }
 
-.review-grid {
+.paper-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 14px;
@@ -626,6 +639,10 @@ onUnmounted(() => {
 
 .fusion-card {
   grid-column: 1 / -1;
+}
+
+.paper-card {
+  padding: 0;
 }
 
 .loading-overlay {
@@ -662,6 +679,10 @@ onUnmounted(() => {
   .hero-grid {
     grid-template-columns: 1fr;
   }
+
+  .paper-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 1080px) {
@@ -670,10 +691,6 @@ onUnmounted(() => {
   }
 
   .camera-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .review-grid {
     grid-template-columns: 1fr;
   }
 }
@@ -692,6 +709,10 @@ onUnmounted(() => {
   }
 
   .stats-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .threat-row {
     grid-template-columns: 1fr;
   }
 }

@@ -119,9 +119,9 @@ function createRoadSurfaceMesh(lanes) {
   return new THREE.Mesh(
     geometry,
     new THREE.MeshStandardMaterial({
-      color: 0x333334,
-      roughness: 0.94,
-      metalness: 0.08,
+      color: 0x5b5f62,
+      roughness: 0.98,
+      metalness: 0.03,
     }),
   )
 }
@@ -233,9 +233,9 @@ export class SRSceneEngine {
     this.elapsedSeconds = 0
     this.lastOverlayFrame = 0
 
-    this.cameraTarget = new THREE.Vector3(0, 1.4, -18)
+    this.cameraTarget = new THREE.Vector3(0, 1.2, -22)
     this.cameraTargetWanted = this.cameraTarget.clone()
-    this.cameraPosition = new THREE.Vector3(10, 8.8, 16)
+    this.cameraPosition = new THREE.Vector3(8.2, 6.4, 13.4)
     this.cameraPositionWanted = this.cameraPosition.clone()
     this.size = { width: 1, height: 1 }
 
@@ -246,8 +246,8 @@ export class SRSceneEngine {
 
   init() {
     this.scene = new THREE.Scene()
-    this.scene.background = new THREE.Color(0x08111d)
-    this.scene.fog = new THREE.FogExp2(0x08111d, 0.03)
+    this.scene.background = new THREE.Color(0x101821)
+    this.scene.fog = new THREE.FogExp2(0x101821, 0.012)
 
     this.camera = new THREE.PerspectiveCamera(42, 1, 0.1, 240)
     this.camera.position.copy(this.cameraPosition)
@@ -261,14 +261,14 @@ export class SRSceneEngine {
     })
     this.renderer.outputColorSpace = THREE.SRGBColorSpace
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping
-    this.renderer.toneMappingExposure = 1.02
+    this.renderer.toneMappingExposure = 1.08
     this.renderer.shadowMap.enabled = true
     this.renderer.shadowMap.type = THREE.PCFShadowMap
 
-    const ambientLight = new THREE.AmbientLight(0xc7d6e5, 0.9)
+    const ambientLight = new THREE.AmbientLight(0xc7d6e5, 0.96)
     this.scene.add(ambientLight)
 
-    const sunLight = new THREE.DirectionalLight(0xffffff, 1.45)
+    const sunLight = new THREE.DirectionalLight(0xffffff, 1.32)
     sunLight.position.set(18, 24, 10)
     sunLight.castShadow = true
     sunLight.shadow.mapSize.set(2048, 2048)
@@ -280,7 +280,7 @@ export class SRSceneEngine {
     sunLight.shadow.camera.bottom = -35
     this.scene.add(sunLight)
 
-    this.scene.add(new THREE.HemisphereLight(0x8fbfe2, 0x0c1220, 0.42))
+    this.scene.add(new THREE.HemisphereLight(0x9ac4df, 0x151c25, 0.36))
 
     this.groundGroup = new THREE.Group()
     this.scene.add(this.groundGroup)
@@ -308,32 +308,19 @@ export class SRSceneEngine {
     const base = new THREE.Mesh(
       new THREE.PlaneGeometry(150, 150),
       new THREE.MeshStandardMaterial({
-        color: 0x0b1727,
-        roughness: 0.86,
-        metalness: 0.28,
+        color: 0x21262d,
+        roughness: 0.97,
+        metalness: 0.06,
       }),
     )
     base.rotation.x = -Math.PI / 2
     base.receiveShadow = true
     this.groundGroup.add(base)
 
-    const sheen = new THREE.Mesh(
-      new THREE.PlaneGeometry(110, 110),
-      new THREE.MeshBasicMaterial({
-        color: 0x133154,
-        transparent: true,
-        opacity: 0.08,
-        depthWrite: false,
-      }),
-    )
-    sheen.rotation.x = -Math.PI / 2
-    sheen.position.y = 0.01
-    this.groundGroup.add(sheen)
-
-    const grid = new THREE.GridHelper(120, 60, 0x2b4d74, 0x16314b)
+    const grid = new THREE.GridHelper(120, 60, 0x3a4856, 0x24313d)
     grid.position.y = 0.015
     grid.material.transparent = true
-    grid.material.opacity = 0.48
+    grid.material.opacity = 0.08
     this.groundGroup.add(grid)
   }
 
@@ -387,7 +374,26 @@ export class SRSceneEngine {
   setScenePacket(scenePacket) {
     this.scenePacket = scenePacket
     this.updateLanes(scenePacket?.lanes || {})
-    this.registry.update(Array.isArray(scenePacket?.objects) ? scenePacket.objects : [])
+    const renderObjects = Array.isArray(scenePacket?.objects)
+      ? scenePacket.objects
+          .filter((objectItem) => {
+            const distance = objectItem?.box3d?.center?.x ?? 0
+            if (objectItem.source === 'pred') {
+              return distance > -4 && distance < 34
+            }
+            return objectItem.threat_level === 'high' && distance > -2 && distance < 20
+          })
+          .sort((left, right) => {
+            const threatWeight = { high: 3, medium: 2, low: 1 }
+            const threatGap = (threatWeight[right.threat_level] || 0) - (threatWeight[left.threat_level] || 0)
+            if (threatGap !== 0) {
+              return threatGap
+            }
+            return (left.box3d?.center?.x ?? 0) - (right.box3d?.center?.x ?? 0)
+          })
+          .slice(0, 12)
+      : []
+    this.registry.update(renderObjects)
     this.updateCameraIntent()
   }
 
@@ -406,8 +412,8 @@ export class SRSceneEngine {
 
     const lateralBias = primaryThreat ? clamp(primaryThreat.box3d.center.y * -0.28, -3.2, 3.2) : 0
     const forwardLook = primaryThreat ? clamp(primaryThreat.box3d.center.x * 0.72, 16, 34) : 18
-    this.cameraTargetWanted.set(lateralBias, 1.35, -forwardLook)
-    this.cameraPositionWanted.set(10 + lateralBias * 0.28, 8.8, 16.5)
+    this.cameraTargetWanted.set(lateralBias, 1.2, -forwardLook)
+    this.cameraPositionWanted.set(8.2 + lateralBias * 0.24, 6.4, 13.6)
   }
 
   resize() {

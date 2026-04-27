@@ -513,7 +513,8 @@ export class ObjectRegistry {
         }
         return left.distanceM - right.distanceM
       })
-      .slice(0, 4)
+      .filter((anchor) => anchor.distanceM <= 28)
+      .slice(0, 2)
   }
 
   clear() {

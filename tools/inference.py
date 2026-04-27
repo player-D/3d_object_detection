@@ -828,19 +828,18 @@ def draw_candidate_on_image(img, candidate, view, color):
     draw_box(img, view['points_2d'], view['depth'], color, thickness=2)
     x1, y1, x2, y2 = view['rect']
     label_pos = (x1 + 2, max(16, y1 - 8))
-    label = candidate['label_text']
-    if candidate['distance'] > 0:
-        label = f"{label} | {candidate['distance']:.1f}m"
-    draw_text(img, label, label_pos, color, font_scale=0.52, thickness=1)
+    label = candidate['display_name']
+    if candidate['score'] > 0:
+        label = f"{label} {candidate['score']:.2f}"
+    draw_text(img, label, label_pos, color, font_scale=0.5, thickness=1)
     cv2.rectangle(img, (x1, y1), (x2, y2), color, 2, cv2.LINE_AA)
 
 
 def build_sr_detail_board(title, subtitle, items, is_pred, camera_images, cam_intrinsics, nusc, sample_token):
-    card_color = (84, 164, 255) if is_pred else (88, 224, 130)
-    accent_color = (35, 42, 52)
-    board_w, board_h = 1600, 900
-    board = np.full((board_h, board_w, 3), (12, 17, 24), dtype=np.uint8)
-    add_overlay_panel(board, (0, 0), (board_w, board_h), (24, 34, 46), alpha=0.48)
+    card_color = (52, 119, 214) if is_pred else (39, 167, 92)
+    accent_color = (236, 240, 245)
+    board_w, board_h = 1600, 920
+    board = np.full((board_h, board_w, 3), (247, 249, 252), dtype=np.uint8)
 
     candidates = build_visual_focus_candidates(
         items,
@@ -861,65 +860,65 @@ def build_sr_detail_board(title, subtitle, items, is_pred, camera_images, cam_in
                 break
     visible_in_main.sort(key=lambda pair: pair[0]['rank_score'], reverse=True)
 
-    for candidate, view in visible_in_main[:6]:
+    main_annotation_count = 4 if is_pred else 3
+    for candidate, view in visible_in_main[:main_annotation_count]:
         draw_candidate_on_image(main_img, candidate, view, card_color)
 
-    header_h = 96
-    outer_pad = 22
-    right_w = 438
-    gap = 18
+    header_h = 84
+    outer_pad = 28
+    right_w = 392
+    gap = 22
     main_w = board_w - outer_pad * 2 - right_w - gap
-    main_h = board_h - header_h - outer_pad * 2
-    crop_gap = 14
-    summary_h = 118
-    crop_start_y = header_h + summary_h + 16
-    available_crop_h = board_h - crop_start_y - outer_pad
-    crop_h = max(176, (available_crop_h - crop_gap * 2) // 3)
+    main_h = 690
+    crop_gap = 16
+    summary_h = 110
+    crop_h = 188
     crop_w = right_w - 24
 
-    main_panel = resize_with_pad(main_img, (main_w, main_h), pad_color=(18, 24, 32))
+    main_panel = resize_with_pad(main_img, (main_w, main_h), pad_color=(243, 246, 250))
     main_x = outer_pad
-    main_y = header_h
+    main_y = header_h + 10
     board[main_y:main_y + main_h, main_x:main_x + main_w] = main_panel
-    cv2.rectangle(board, (main_x, main_y), (main_x + main_w, main_y + main_h), (44, 56, 70), 1, cv2.LINE_AA)
+    cv2.rectangle(board, (main_x, main_y), (main_x + main_w, main_y + main_h), (202, 210, 220), 1, cv2.LINE_AA)
 
-    cv2.putText(board, title, (outer_pad, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.05, (238, 244, 249), 2, cv2.LINE_AA)
-    cv2.putText(board, subtitle, (outer_pad, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (166, 180, 194), 1, cv2.LINE_AA)
-    cv2.putText(board, f"Main camera: {main_cam}", (main_x + 12, main_y + 28), cv2.FONT_HERSHEY_SIMPLEX, 0.72, (236, 242, 247), 2, cv2.LINE_AA)
+    cv2.putText(board, title, (outer_pad, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (46, 55, 66), 2, cv2.LINE_AA)
+    cv2.putText(board, subtitle, (outer_pad, 66), cv2.FONT_HERSHEY_SIMPLEX, 0.54, (104, 117, 132), 1, cv2.LINE_AA)
+    cv2.putText(board, f"Main camera: {main_cam}", (main_x + 12, main_y + 28), cv2.FONT_HERSHEY_SIMPLEX, 0.66, (52, 64, 78), 2, cv2.LINE_AA)
 
     right_x = main_x + main_w + gap
-    right_y = header_h
-    add_overlay_panel(board, (right_x, right_y), (right_x + right_w, right_y + summary_h), accent_color, alpha=0.72)
-    cv2.rectangle(board, (right_x, right_y), (right_x + right_w, right_y + summary_h), (44, 56, 70), 1, cv2.LINE_AA)
-    cv2.putText(board, "Detail Review", (right_x + 14, right_y + 28), cv2.FONT_HERSHEY_SIMPLEX, 0.76, (240, 245, 249), 2, cv2.LINE_AA)
-    cv2.putText(board, f"Visible targets: {len(candidates)}", (right_x + 14, right_y + 60), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (194, 203, 212), 1, cv2.LINE_AA)
-    cv2.putText(board, "Priority classes: pedestrian / car / bike", (right_x + 14, right_y + 86), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (160, 174, 188), 1, cv2.LINE_AA)
+    right_y = header_h + 10
+    cv2.rectangle(board, (right_x, right_y), (right_x + right_w, right_y + summary_h), (214, 220, 228), 1, cv2.LINE_AA)
+    add_overlay_panel(board, (right_x, right_y), (right_x + right_w, right_y + summary_h), accent_color, alpha=0.85)
+    cv2.putText(board, "Focus Summary", (right_x + 14, right_y + 28), cv2.FONT_HERSHEY_SIMPLEX, 0.72, (50, 58, 70), 2, cv2.LINE_AA)
+    cv2.putText(board, f"Main annotations: {min(main_annotation_count, len(visible_in_main))}", (right_x + 14, right_y + 56), cv2.FONT_HERSHEY_SIMPLEX, 0.54, (92, 102, 116), 1, cv2.LINE_AA)
+    cv2.putText(board, f"Focus crops: {min(2, len(candidates))}", (right_x + 14, right_y + 80), cv2.FONT_HERSHEY_SIMPLEX, 0.54, (92, 102, 116), 1, cv2.LINE_AA)
+    cv2.putText(board, "Paper-ready view keeps only key objects and local details.", (right_x + 14, right_y + 102), cv2.FONT_HERSHEY_SIMPLEX, 0.46, (116, 126, 138), 1, cv2.LINE_AA)
 
-    crop_start_y = right_y + summary_h + 16
-    for slot in range(3):
+    crop_start_y = right_y + summary_h + 18
+    for slot in range(2):
         card_y = crop_start_y + slot * (crop_h + crop_gap)
-        add_overlay_panel(board, (right_x, card_y), (right_x + right_w, card_y + crop_h), accent_color, alpha=0.72)
-        cv2.rectangle(board, (right_x, card_y), (right_x + right_w, card_y + crop_h), (44, 56, 70), 1, cv2.LINE_AA)
+        add_overlay_panel(board, (right_x, card_y), (right_x + right_w, card_y + crop_h), accent_color, alpha=0.9)
+        cv2.rectangle(board, (right_x, card_y), (right_x + right_w, card_y + crop_h), (214, 220, 228), 1, cv2.LINE_AA)
 
         if slot >= len(candidates):
-            cv2.putText(board, "No more projected targets", (right_x + 18, card_y + 40), cv2.FONT_HERSHEY_SIMPLEX, 0.64, (220, 227, 234), 2, cv2.LINE_AA)
-            cv2.putText(board, "The current sample keeps the remaining area clean.", (right_x + 18, card_y + 72), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (156, 170, 184), 1, cv2.LINE_AA)
+            cv2.putText(board, "No additional key target", (right_x + 18, card_y + 40), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (72, 82, 94), 2, cv2.LINE_AA)
+            cv2.putText(board, "The remaining scene is intentionally kept clean.", (right_x + 18, card_y + 72), cv2.FONT_HERSHEY_SIMPLEX, 0.46, (120, 130, 142), 1, cv2.LINE_AA)
             continue
 
         candidate = candidates[slot]
         view = candidate['best_view']
         crop_source = camera_images[view['cam_name']].copy()
         draw_candidate_on_image(crop_source, candidate, view, card_color)
-        crop_target_h = max(112, crop_h - 66)
-        crop_img = gentle_focus_crop(crop_source, view['rect'], (crop_w, crop_target_h), pad_ratio=0.95, min_crop_ratio=0.38)
+        crop_target_h = max(112, crop_h - 62)
+        crop_img = gentle_focus_crop(crop_source, view['rect'], (crop_w, crop_target_h), pad_ratio=0.75, min_crop_ratio=0.32)
 
-        card_img_y = card_y + 58
+        card_img_y = card_y + 52
         board[card_img_y:card_img_y + crop_img.shape[0], right_x + 12:right_x + 12 + crop_img.shape[1]] = crop_img
         cv2.rectangle(
             board,
             (right_x + 12, card_img_y),
             (right_x + 12 + crop_img.shape[1], card_img_y + crop_img.shape[0]),
-            (62, 78, 94),
+            (204, 211, 220),
             1,
             cv2.LINE_AA,
         )
@@ -927,7 +926,7 @@ def build_sr_detail_board(title, subtitle, items, is_pred, camera_images, cam_in
         header_text = candidate['display_name']
         if is_pred:
             header_text = f"{header_text} {candidate['score']:.2f}"
-        cv2.putText(board, header_text, (right_x + 14, card_y + 24), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (240, 245, 249), 2, cv2.LINE_AA)
+        cv2.putText(board, header_text, (right_x + 14, card_y + 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (48, 56, 68), 2, cv2.LINE_AA)
         cv2.putText(
             board,
             f"{view['cam_name']} | {candidate['distance']:.1f}m",
@@ -938,6 +937,9 @@ def build_sr_detail_board(title, subtitle, items, is_pred, camera_images, cam_in
             1,
             cv2.LINE_AA,
         )
+
+    figure_note = "Suggested for thesis: clean camera evidence with limited target annotation."
+    cv2.putText(board, figure_note, (outer_pad, board_h - 22), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (108, 118, 130), 1, cv2.LINE_AA)
 
     return board
 
@@ -1179,27 +1181,18 @@ def visualize(images, cam_intrinsics, gt_bboxes, gt_labels, pred_scores, pred_la
     if best_pred is None:
         cv2.putText(canvas_top_pair, 'No prediction found', (30, bottom_y + half_h // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
 
-    # 简化版：只输出 2D BEV 鸟瞰图和 JSON 数据
     def draw_simple_bev(items, title="BEV"):
-        bev_size, ppm = 900, 10.0
-        center_x, center_y = bev_size // 2, bev_size // 2  # 中心点在图片中心
-        bev_img = np.zeros((bev_size, bev_size, 3), dtype=np.uint8)
-        
-        # 背景色：深色背景
-        bev_img[:, :] = (30, 35, 40)
+        bev_w, bev_h = 1280, 920
+        ppm = 12.0
+        center_x = int(bev_w * 0.46)
+        center_y = int(bev_h * 0.78)
+        bev_img = np.full((bev_h, bev_w, 3), (245, 247, 250), dtype=np.uint8)
 
-        # 绘制网格线（深色背景下的浅色网格）
-        for meters in [10, 20, 30, 40, 50]:
-            r = int(meters * ppm)
-            cv2.circle(bev_img, (center_x, center_y), r, (60, 70, 80), 1)
-        
-        # 绘制十字线
-        cv2.line(bev_img, (center_x, 0), (center_x, bev_size), (60, 70, 80), 1)
-        cv2.line(bev_img, (0, center_y), (bev_size, center_y), (60, 70, 80), 1)
+        cv2.rectangle(bev_img, (34, 34), (bev_w - 34, bev_h - 34), (220, 226, 233), 2, cv2.LINE_AA)
+        cv2.putText(bev_img, title, (54, 82), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (47, 58, 70), 2, cv2.LINE_AA)
+        cv2.putText(bev_img, "Clean BEV for thesis: lane structure, ego vehicle and key predictions.", (54, 116), cv2.FONT_HERSHEY_SIMPLEX, 0.56, (108, 118, 130), 1, cv2.LINE_AA)
 
-        # 坐标转换：自车前方为 X 轴正方向，左侧为 Y 轴正方向
         def ego_to_pixel(x_forward, y_left):
-            # 传统俯视图：X 轴向上，Y 轴向右
             pixel_x = center_x + int(y_left * ppm)
             pixel_y = center_y - int(x_forward * ppm)
             return pixel_x, pixel_y
@@ -1219,33 +1212,53 @@ def visualize(images, cam_intrinsics, gt_bboxes, gt_labels, pred_scores, pred_la
             curvature = float(lane_profile.get('curvature', 0.0))
 
         def road_shift(x_forward):
-            blend = min(1.0, max(0.0, (x_forward + 8.0) / 72.0))
-            return curvature * (blend ** 2) * 4.0
+            blend = min(1.0, max(0.0, (x_forward + 6.0) / 66.0))
+            return curvature * (blend ** 2) * 3.8
+
+        for meters in [10, 20, 30, 40, 50]:
+            left = ego_to_pixel(meters, -11.5)
+            right = ego_to_pixel(meters, 11.5)
+            cv2.line(bev_img, left, right, (229, 233, 238), 1, cv2.LINE_AA)
+            cv2.putText(bev_img, f"{meters} m", (right[0] + 10, right[1] + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (124, 132, 143), 1, cv2.LINE_AA)
 
         road_left = []
         road_right = []
-        for x_forward in np.linspace(-8.0, 72.0, 56):
+        shoulder_left = []
+        shoulder_right = []
+        for x_forward in np.linspace(-4.0, 54.0, 56):
             shift = road_shift(float(x_forward))
             road_left.append(ego_to_pixel(float(x_forward), left_boundary_y + shift))
             road_right.append(ego_to_pixel(float(x_forward), right_boundary_y + shift))
+            shoulder_left.append(ego_to_pixel(float(x_forward), left_boundary_y + shift + 1.2))
+            shoulder_right.append(ego_to_pixel(float(x_forward), right_boundary_y + shift - 1.2))
 
+        shoulder_polygon = np.array(shoulder_left + shoulder_right[::-1], dtype=np.int32)
         road_polygon = np.array(road_left + road_right[::-1], dtype=np.int32)
-        cv2.fillPoly(bev_img, [road_polygon], (42, 42, 44))
+        cv2.fillPoly(bev_img, [shoulder_polygon], (227, 230, 234))
+        cv2.fillPoly(bev_img, [road_polygon], (84, 88, 94))
 
-        if left_boundary_kind == 'curb':
-            curb_pts = np.array([ego_to_pixel(float(x_forward), left_boundary_y + road_shift(float(x_forward))) for x_forward in np.linspace(-8.0, 72.0, 56)], dtype=np.int32)
-            cv2.polylines(bev_img, [curb_pts], False, (214, 214, 214), 4, cv2.LINE_AA)
-        if right_boundary_kind == 'curb':
-            curb_pts = np.array([ego_to_pixel(float(x_forward), right_boundary_y + road_shift(float(x_forward))) for x_forward in np.linspace(-8.0, 72.0, 56)], dtype=np.int32)
-            cv2.polylines(bev_img, [curb_pts], False, (214, 214, 214), 4, cv2.LINE_AA)
+        left_pts = np.array(road_left, dtype=np.int32)
+        right_pts = np.array(road_right, dtype=np.int32)
+        boundary_color = (244, 246, 248)
+        boundary_width_left = 4 if left_boundary_kind == 'curb' else 2
+        boundary_width_right = 4 if right_boundary_kind == 'curb' else 2
+        cv2.polylines(bev_img, [left_pts], False, boundary_color, boundary_width_left, cv2.LINE_AA)
+        cv2.polylines(bev_img, [right_pts], False, boundary_color, boundary_width_right, cv2.LINE_AA)
 
         for offset in lane_positions:
             lane_points = []
-            for x_forward in np.linspace(-8.0, 72.0, 44):
+            for x_forward in np.linspace(-2.0, 52.0, 34):
                 lane_points.append(ego_to_pixel(float(x_forward), offset + road_shift(float(x_forward))))
             lane_points = np.array(lane_points, dtype=np.int32)
             for index in range(0, len(lane_points) - 1, 2):
-                cv2.line(bev_img, tuple(lane_points[index]), tuple(lane_points[min(index + 1, len(lane_points) - 1)]), (180, 180, 180), 2, cv2.LINE_AA)
+                cv2.line(
+                    bev_img,
+                    tuple(lane_points[index]),
+                    tuple(lane_points[min(index + 1, len(lane_points) - 1)]),
+                    (225, 228, 232),
+                    2,
+                    cv2.LINE_AA,
+                )
 
         def corners_xy(box_ego):
             x, y, _ = box_ego.center
@@ -1253,60 +1266,92 @@ def visualize(images, cam_intrinsics, gt_bboxes, gt_labels, pred_scores, pred_la
             yaw = box_ego.orientation.yaw_pitch_roll[0]
             local = np.array([[l / 2, w / 2], [l / 2, -w / 2], [-l / 2, -w / 2], [-l / 2, w / 2]], dtype=np.float32)
             rot = np.array([[math.cos(yaw), -math.sin(yaw)], [math.sin(yaw), math.cos(yaw)]], dtype=np.float32)
-            c = local @ rot.T
-            c[:, 0] += x
-            c[:, 1] += y
-            return c
+            corners = local @ rot.T
+            corners[:, 0] += x
+            corners[:, 1] += y
+            return corners
 
-        def draw_box_bev(box_ego, color):
+        def draw_box_bev(box_ego, fill_color, edge_color, heading_color):
             corners = corners_xy(box_ego)
             pts = np.array([ego_to_pixel(x, y) for x, y in corners], dtype=np.int32)
-            cv2.fillPoly(bev_img, [pts], color)
-            cv2.polylines(bev_img, [pts], True, (255, 255, 255), 2)
+            center = ego_to_pixel(float(box_ego.center[0]), float(box_ego.center[1]))
+            head = ego_to_pixel(
+                float(box_ego.center[0] + math.cos(box_ego.orientation.yaw_pitch_roll[0]) * box_ego.wlh[1] * 0.35),
+                float(box_ego.center[1] + math.sin(box_ego.orientation.yaw_pitch_roll[0]) * box_ego.wlh[1] * 0.35),
+            )
+            cv2.fillPoly(bev_img, [pts], fill_color)
+            cv2.polylines(bev_img, [pts], True, edge_color, 2, cv2.LINE_AA)
+            cv2.line(bev_img, center, head, heading_color, 2, cv2.LINE_AA)
+            return center
 
-        # 绘制自车（在原点）
         ego_corners = np.array([
             [2.25, 0.9], [2.25, -0.9], [-2.25, -0.9], [-2.25, 0.9]
         ], dtype=np.float32)
         ego_pts = np.array([ego_to_pixel(x, y) for x, y in ego_corners], dtype=np.int32)
-        cv2.fillPoly(bev_img, [ego_pts], (80, 120, 160))
-        cv2.polylines(bev_img, [ego_pts], True, (200, 220, 240), 2)
+        cv2.fillPoly(bev_img, [ego_pts], (211, 221, 233))
+        cv2.polylines(bev_img, [ego_pts], True, (250, 252, 255), 2, cv2.LINE_AA)
+        cv2.putText(bev_img, "Ego", (ego_pts[3][0] - 12, ego_pts[3][1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (56, 67, 80), 2, cv2.LINE_AA)
 
-        # 绘制预测框，只显示近距离目标避免堆叠
-        display_distance = 45.0
-        label_budget = 8
-        label_count = 0
-        used_label_y = []
-        
+        def item_priority(pred):
+            class_weight = focus_class_priority(pred['class_name'])
+            distance = float(np.linalg.norm(np.asarray(pred['box'].center[:2], dtype=np.float32)))
+            score = float(pred.get('score', 0.0))
+            return class_weight * 100.0 + max(0.0, 40.0 - distance) * 4.0 + score * 40.0
+
         ranked_items = sorted(
-            pred_items,
-            key=lambda pred: (
-                np.linalg.norm(np.asarray(pred['box'].center[:2], dtype=np.float32)),
-                -float(pred.get('score', 0.0)),
-            ),
-        )
+            [pred for pred in items if float(np.linalg.norm(np.asarray(pred['box'].center[:2], dtype=np.float32))) <= 38.0],
+            key=item_priority,
+            reverse=True,
+        )[:8]
+
+        label_items = ranked_items[:4]
         for pred in ranked_items:
             x, y, _ = pred['box'].center
             distance = math.sqrt(x * x + y * y)
-            if distance <= display_distance:
-                # 根据距离调整颜色
-                if distance <= 15.0:
-                    color = (255, 100, 100)  # 近处红色
-                elif distance <= 30.0:
-                    color = (255, 200, 100)  # 中距离橙色
-                else:
-                    color = (100, 200, 255)  # 远处蓝色
-                draw_box_bev(pred['box'], color)
-                # 只为近处目标添加标签
-                if distance <= 20.0 and label_count < label_budget:
-                    px, py = ego_to_pixel(x, y)
-                    label = short_pred_name(pred['class_name'])
-                    text_y = py - 10
-                    while any(abs(text_y - existing) < 16 for existing in used_label_y):
-                        text_y -= 16
-                    used_label_y.append(text_y)
-                    cv2.putText(bev_img, label, (px - 10, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 255, 255), 1, cv2.LINE_AA)
-                    label_count += 1
+            threat_color = (92, 187, 255)
+            edge_color = (255, 255, 255)
+            if distance <= 14.0:
+                threat_color = (98, 110, 236)
+            elif distance <= 24.0:
+                threat_color = (109, 163, 255)
+            center = draw_box_bev(pred['box'], threat_color, edge_color, (243, 247, 252))
+            if pred in label_items:
+                label = f"{short_pred_name(pred['class_name'])} {pred['score']:.2f}"
+                text_origin = (center[0] + 10, center[1] - 10)
+                cv2.rectangle(
+                    bev_img,
+                    (text_origin[0] - 4, text_origin[1] - 18),
+                    (text_origin[0] + 94, text_origin[1] + 5),
+                    (251, 252, 254),
+                    -1,
+                )
+                cv2.rectangle(
+                    bev_img,
+                    (text_origin[0] - 4, text_origin[1] - 18),
+                    (text_origin[0] + 94, text_origin[1] + 5),
+                    (217, 223, 230),
+                    1,
+                    cv2.LINE_AA,
+                )
+                cv2.putText(bev_img, label, text_origin, cv2.FONT_HERSHEY_SIMPLEX, 0.46, (62, 72, 84), 1, cv2.LINE_AA)
+
+        summary_x1, summary_y1 = 880, 156
+        summary_x2, summary_y2 = bev_w - 58, 420
+        cv2.rectangle(bev_img, (summary_x1, summary_y1), (summary_x2, summary_y2), (229, 233, 239), -1)
+        cv2.rectangle(bev_img, (summary_x1, summary_y1), (summary_x2, summary_y2), (214, 221, 228), 1, cv2.LINE_AA)
+        cv2.putText(bev_img, "Figure Notes", (summary_x1 + 20, summary_y1 + 34), cv2.FONT_HERSHEY_SIMPLEX, 0.72, (54, 63, 76), 2, cv2.LINE_AA)
+        cv2.putText(bev_img, f"Key predictions: {len(ranked_items)}", (summary_x1 + 20, summary_y1 + 78), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (87, 98, 110), 1, cv2.LINE_AA)
+        cv2.putText(bev_img, "Only near-range targets are retained.", (summary_x1 + 20, summary_y1 + 120), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (109, 118, 129), 1, cv2.LINE_AA)
+        cv2.putText(bev_img, "Road geometry is drawn from the inferred lane profile.", (summary_x1 + 20, summary_y1 + 156), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (109, 118, 129), 1, cv2.LINE_AA)
+        cv2.putText(bev_img, "Suitable for thesis comparison with SR detail figures.", (summary_x1 + 20, summary_y1 + 192), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (109, 118, 129), 1, cv2.LINE_AA)
+
+        cv2.putText(bev_img, "Legend", (summary_x1 + 20, summary_y1 + 236), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (63, 73, 85), 2, cv2.LINE_AA)
+        cv2.rectangle(bev_img, (summary_x1 + 22, summary_y1 + 256), (summary_x1 + 44, summary_y1 + 278), (211, 221, 233), -1)
+        cv2.putText(bev_img, "ego vehicle", (summary_x1 + 56, summary_y1 + 273), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (97, 107, 118), 1, cv2.LINE_AA)
+        cv2.rectangle(bev_img, (summary_x1 + 22, summary_y1 + 292), (summary_x1 + 44, summary_y1 + 314), (109, 163, 255), -1)
+        cv2.putText(bev_img, "predicted object", (summary_x1 + 56, summary_y1 + 309), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (97, 107, 118), 1, cv2.LINE_AA)
+        cv2.line(bev_img, (summary_x1 + 22, summary_y1 + 328), (summary_x1 + 44, summary_y1 + 328), (225, 228, 232), 2, cv2.LINE_AA)
+        cv2.putText(bev_img, "lane marking", (summary_x1 + 56, summary_y1 + 334), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (97, 107, 118), 1, cv2.LINE_AA)
 
         return bev_img
 
