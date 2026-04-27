@@ -99,7 +99,6 @@ watch(
       engine.setScenePacket(scene)
     }
   },
-  { deep: true },
 )
 
 onUnmounted(() => {

@@ -44,6 +44,17 @@ const rootRef = ref(null)
 const canvasRef = ref(null)
 
 let resizeObserver = null
+let renderFrameId = 0
+
+function scheduleRender() {
+  if (renderFrameId) {
+    cancelAnimationFrame(renderFrameId)
+  }
+  renderFrameId = requestAnimationFrame(() => {
+    renderFrameId = 0
+    render()
+  })
+}
 
 function toCanvasPoint(xForward, yLeft, width, height) {
   const xRange = 20
@@ -321,6 +332,9 @@ function drawObject(ctx, objectItem, width, height, labelAnchorY = null, showLab
 }
 
 function drawEgo(ctx, ego, width, height) {
+  if (!ego?.box3d) {
+    return
+  }
   drawObject(
     ctx,
     {
@@ -401,20 +415,24 @@ function render() {
 }
 
 onMounted(() => {
-  nextTick(render)
+  nextTick(scheduleRender)
   if (typeof ResizeObserver !== 'undefined') {
-    resizeObserver = new ResizeObserver(() => render())
+    resizeObserver = new ResizeObserver(() => scheduleRender())
     resizeObserver.observe(rootRef.value)
   }
 })
 
 watch(
   () => props.scene,
-  () => nextTick(render),
-  { deep: true, immediate: true },
+  () => nextTick(scheduleRender),
+  { immediate: true },
 )
 
 onUnmounted(() => {
+  if (renderFrameId) {
+    cancelAnimationFrame(renderFrameId)
+    renderFrameId = 0
+  }
   if (resizeObserver) {
     resizeObserver.disconnect()
   }
