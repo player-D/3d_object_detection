@@ -1,29 +1,25 @@
-# TDR-QAF 3D Object Detection System - 统一依赖文件
-# PyTorch 会根据系统自动选择 CPU 或 CUDA 版本
-
-# 深度学习核心框架
+# Core deep learning stack
 torch>=2.0.0
 torchvision>=0.15.0
 torchaudio>=2.0.0
 
-# 3D 视觉与 nuScenes 官方依赖
+# 3D perception and dataset tooling
 nuscenes-devkit>=1.1.11
 pyquaternion>=0.9.9
-
-# 数学运算与目标匹配
 scipy>=1.10.0
 numpy>=1.24.0,<2.0.0
 
-# 图像处理与可视化
+# Imaging and visualization
 opencv-python>=4.5.5.64
 Pillow>=9.0.0
 matplotlib>=3.5.0
 
-# 进度条与命令行工具
+# Utilities
 tqdm>=4.65.0
 fire>=0.4.0
+tensorboard>=2.14.0
 
-# FastAPI 后端依赖
+# Backend service
 fastapi>=0.109.0
 uvicorn[standard]>=0.27.0
 pydantic>=2.0.0

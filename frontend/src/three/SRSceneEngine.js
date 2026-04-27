@@ -229,7 +229,8 @@ export class SRSceneEngine {
     this.onOverlayUpdate = onOverlayUpdate
     this.scenePacket = null
     this.animationFrame = 0
-    this.clock = new THREE.Clock()
+    this.lastFrameTime = performance.now()
+    this.elapsedSeconds = 0
     this.lastOverlayFrame = 0
 
     this.cameraTarget = new THREE.Vector3(0, 1.4, -18)
@@ -262,7 +263,7 @@ export class SRSceneEngine {
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping
     this.renderer.toneMappingExposure = 1.02
     this.renderer.shadowMap.enabled = true
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap
+    this.renderer.shadowMap.type = THREE.PCFShadowMap
 
     const ambientLight = new THREE.AmbientLight(0xc7d6e5, 0.9)
     this.scene.add(ambientLight)
@@ -423,8 +424,11 @@ export class SRSceneEngine {
   animate() {
     this.animationFrame = window.requestAnimationFrame(() => this.animate())
 
-    const deltaSeconds = Math.min(this.clock.getDelta(), 0.05)
-    const elapsedSeconds = this.clock.elapsedTime
+    const now = performance.now()
+    const deltaSeconds = Math.min((now - this.lastFrameTime) / 1000, 0.05)
+    this.lastFrameTime = now
+    this.elapsedSeconds += deltaSeconds
+    const elapsedSeconds = this.elapsedSeconds
 
     const cameraAlpha = 1 - Math.exp(-deltaSeconds * 2.8)
     this.cameraTarget.lerp(this.cameraTargetWanted, cameraAlpha)
