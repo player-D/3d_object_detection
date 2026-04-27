@@ -1,4 +1,10 @@
 import * as THREE from 'three'
+import {
+  collectMaterials,
+  createFallbackRenderable,
+  disposeRenderable,
+  loadRenderableAsset,
+} from './ModelAssetLoader'
 
 const Y_AXIS = new THREE.Vector3(0, 1, 0)
 const THREAT_RANK = { low: 1, medium: 2, high: 3 }
@@ -311,6 +317,13 @@ function setGroupOpacity(group, opacity) {
   })
 }
 
+function disposeRenderableRoot(root) {
+  if (!root) {
+    return
+  }
+  disposeRenderable(root)
+}
+
 export class ObjectRegistry {
   constructor(scene) {
     this.scene = scene
@@ -340,11 +353,11 @@ export class ObjectRegistry {
 
   createTracked(objectData) {
     const group = new THREE.Group()
-    const model = createSemanticModel(objectData)
+    const renderRoot = createFallbackRenderable(objectData)
     const ring = createThreatRing()
     const shadow = createGroundShadow(Math.max(objectData.box3d.size.length, objectData.box3d.size.width) * 0.35)
     group.add(shadow)
-    group.add(model.root)
+    group.add(renderRoot)
     group.add(ring)
 
     const tracked = {
@@ -352,20 +365,47 @@ export class ObjectRegistry {
       group,
       ring,
       shadow,
-      materials: model.materials,
+      renderRoot,
+      materials: collectMaterials(renderRoot),
       targetPosition: toWorldPosition(objectData.box3d.center),
       targetQuaternion: toWorldQuaternion(objectData.box3d.yaw),
       meta: {},
       opacity: 0.04,
       stale: false,
       pulseOffset: Math.random(),
+      assetRequestId: 0,
     }
 
     group.position.copy(tracked.targetPosition)
     group.quaternion.copy(tracked.targetQuaternion)
     this.syncTracked(tracked, objectData, true)
     setGroupOpacity(group, tracked.opacity)
+    this.upgradeTrackedRenderable(tracked, objectData)
     return tracked
+  }
+
+  async upgradeTrackedRenderable(tracked, objectData) {
+    const requestId = tracked.assetRequestId + 1
+    tracked.assetRequestId = requestId
+
+    try {
+      const asset = await loadRenderableAsset(objectData)
+      if (!asset || tracked.assetRequestId !== requestId || tracked.stale) {
+        if (asset) {
+          disposeRenderableRoot(asset)
+        }
+        return
+      }
+
+      tracked.group.remove(tracked.renderRoot)
+      disposeRenderableRoot(tracked.renderRoot)
+      tracked.renderRoot = asset
+      tracked.group.add(asset)
+      tracked.materials = collectMaterials(asset)
+      setGroupOpacity(asset, tracked.opacity)
+    } catch {
+      // Keep the procedural fallback when model assets are unavailable.
+    }
   }
 
   syncTracked(tracked, objectData, snap = false) {

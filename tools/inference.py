@@ -7,6 +7,7 @@ import time
 import math
 import traceback
 import json
+import argparse
 import numpy as np
 import torch
 import cv2
@@ -20,9 +21,17 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from backend.scene_schema import build_scene_stream
 from dataloaders.nuscenes_dataset import NuScenesDataset
 from models.tdr_detector import TDRDetector
+from tools.runtime_config import (
+    resolve_checkpoint_path,
+    resolve_output_root,
+    resolve_sample_indices_path,
+)
 from nuscenes.utils.data_classes import Box
 from nuscenes.utils.geometry_utils import view_points
 from pyquaternion import Quaternion
+
+def clamp(x, min_val, max_val):
+    return max(min_val, min(x, max_val))
 
 CAMERA_NAMES = [
     'CAM_FRONT',
@@ -50,7 +59,7 @@ CLASS_NAMES = {
 def create_output_dir():
     import datetime
     current_time = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-    output_dir = os.path.join('output', current_time)
+    output_dir = os.path.join(resolve_output_root('output'), current_time)
     os.makedirs(output_dir, exist_ok=True)
     return output_dir
 
@@ -69,23 +78,37 @@ def global_to_ego(box, ego_pose):
     return box_ego
 
 
-def tensor_to_bgr_image(img_tensor):
+def enhance_visual_detail(img_bgr, detail_level='balanced'):
+    if img_bgr is None or img_bgr.size == 0:
+        return img_bgr
+
+    level = {
+        'mild': {'clip': 1.18, 'sigma_s': 4, 'sigma_r': 0.04, 'sharp': 0.04, 'saturation': 1.00},
+        'balanced': {'clip': 1.35, 'sigma_s': 6, 'sigma_r': 0.06, 'sharp': 0.06, 'saturation': 1.00},
+        'focus': {'clip': 1.55, 'sigma_s': 8, 'sigma_r': 0.08, 'sharp': 0.08, 'saturation': 1.01},
+    }.get(detail_level, {'clip': 1.35, 'sigma_s': 6, 'sigma_r': 0.06, 'sharp': 0.06, 'saturation': 1.00})
+
+    lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
+    l_chan, a_chan, b_chan = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=level['clip'], tileGridSize=(8, 8))
+    l_chan = clahe.apply(l_chan)
+    enhanced = cv2.cvtColor(cv2.merge([l_chan, a_chan, b_chan]), cv2.COLOR_LAB2BGR)
+    enhanced = cv2.detailEnhance(enhanced, sigma_s=level['sigma_s'], sigma_r=level['sigma_r'])
+    blurred = cv2.GaussianBlur(enhanced, (0, 0), sigmaX=1.2)
+    sharpened = cv2.addWeighted(enhanced, 1.0 + level['sharp'], blurred, -level['sharp'], 0)
+    sharpened = cv2.addWeighted(sharpened, 0.62, img_bgr, 0.38, 0)
+
+    hsv = cv2.cvtColor(sharpened, cv2.COLOR_BGR2HSV).astype(np.float32)
+    hsv[..., 1] = np.clip(hsv[..., 1] * level['saturation'], 0, 255)
+    hsv[..., 2] = np.clip(hsv[..., 2] * 1.01, 0, 255)
+    return cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+
+
+def tensor_to_bgr_image(img_tensor, detail_level='balanced'):
     img = img_tensor.detach().cpu().numpy().transpose(1, 2, 0)
     img = np.clip(img * 255.0, 0, 255).astype(np.uint8)
-    return cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-
-
-def resolve_checkpoint_path(checkpoint_path=None):
-    if checkpoint_path is not None:
-        if os.path.exists(checkpoint_path):
-            return os.path.abspath(checkpoint_path)
-        raise FileNotFoundError(f'Checkpoint not found: {checkpoint_path}')
-    
-    # 默认硬编码路径，与 main 函数保持一致
-    default_path = './saved_models/04_10_10-21/best_model.pth'
-    if os.path.exists(default_path):
-        return os.path.abspath(default_path)
-    raise FileNotFoundError(f'Checkpoint not found: {default_path}')
+    img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+    return enhance_visual_detail(img_bgr, detail_level=detail_level)
 
 
 def load_model(device, is_overfit=False, checkpoint_path=None):
@@ -570,10 +593,25 @@ def resize_with_pad(img, target_size, pad_color=(25, 25, 25)):
     return canvas
 
 
+def resize_to_cover(img, target_size):
+    tw, th = target_size
+    h, w = img.shape[:2]
+    if h <= 0 or w <= 0:
+        return np.zeros((th, tw, 3), dtype=np.uint8)
+    scale = max(tw / float(w), th / float(h))
+    new_w = max(1, int(round(w * scale)))
+    new_h = max(1, int(round(h * scale)))
+    interpolation = cv2.INTER_CUBIC if scale > 1.0 else cv2.INTER_AREA
+    resized = cv2.resize(img, (new_w, new_h), interpolation=interpolation)
+    off_x = max(0, (new_w - tw) // 2)
+    off_y = max(0, (new_h - th) // 2)
+    return resized[off_y:off_y + th, off_x:off_x + tw]
+
+
 def gentle_focus_crop(img, rect, target_size, pad_ratio=0.7, min_crop_ratio=0.48):
     h, w = img.shape[:2]
     if rect is None:
-        return resize_with_pad(img, target_size)
+        return enhance_visual_detail(resize_to_cover(img, target_size), detail_level='mild')
     x1, y1, x2, y2 = rect
     bw = max(1, x2 - x1)
     bh = max(1, y2 - y1)
@@ -587,7 +625,8 @@ def gentle_focus_crop(img, rect, target_size, pad_ratio=0.7, min_crop_ratio=0.48
     sx2 = sx1 + crop_w
     sy2 = sy1 + crop_h
     crop = img[sy1:sy2, sx1:sx2]
-    return resize_with_pad(crop, target_size)
+    focused = resize_to_cover(crop, target_size)
+    return enhance_visual_detail(focused, detail_level='focus')
 
 
 def auto_crop_scene_image(img, bg_bgr=(250, 245, 240), tolerance=12, pad=36):
@@ -659,13 +698,263 @@ def full_gt_name(cat_name):
         return CLASS_NAMES.get(cls_id, cat_name)
     return cat_name.split('.')[-1]
 
+
+def focus_class_priority(class_name):
+    order = {
+        'pedestrian': 12,
+        'car': 11,
+        'motorcycle': 10,
+        'bicycle': 9,
+        'bus': 8,
+        'truck': 7,
+        'trailer': 6,
+        'construction_vehicle': 5,
+        'barrier': 4,
+        'traffic_cone': 3,
+    }
+    return order.get(class_name, 1)
+
+
+def add_overlay_panel(img, top_left, bottom_right, color, alpha=0.32):
+    x1, y1 = top_left
+    x2, y2 = bottom_right
+    x1 = max(0, min(int(x1), img.shape[1] - 1))
+    y1 = max(0, min(int(y1), img.shape[0] - 1))
+    x2 = max(0, min(int(x2), img.shape[1]))
+    y2 = max(0, min(int(y2), img.shape[0]))
+    if x2 <= x1 or y2 <= y1:
+        return
+    overlay = img.copy()
+    cv2.rectangle(overlay, (x1, y1), (x2, y2), color, -1)
+    img[y1:y2, x1:x2] = cv2.addWeighted(
+        overlay[y1:y2, x1:x2],
+        alpha,
+        img[y1:y2, x1:x2],
+        1.0 - alpha,
+        0.0,
+    )
+
+
+def item_distance_meters(item, is_pred):
+    box = item['box'] if is_pred else item['box_ego']
+    center_xy = np.asarray(box.center[:2], dtype=np.float32)
+    return float(np.linalg.norm(center_xy))
+
+
+def item_display_name(item, is_pred):
+    if is_pred:
+        return full_pred_name(item['class_name'])
+    return full_gt_name(item['cat_name'])
+
+
+def build_visual_focus_candidates(items, is_pred, camera_images, cam_intrinsics, nusc, sample_token):
+    candidates = []
+    for item in items:
+        class_name = item['class_name'] if is_pred else CLASS_NAMES.get(item['class_id'], item['cat_short'])
+        distance = item_distance_meters(item, is_pred=is_pred)
+        score = float(item.get('score', 0.0) or 0.0)
+        box_ref = item['box'] if is_pred else item['box_global']
+        display_name = item_display_name(item, is_pred=is_pred)
+        label_text = f"{display_name} {score:.2f}" if is_pred else display_name
+
+        views = []
+        for cam_idx, cam_name in enumerate(CAMERA_NAMES):
+            img = camera_images[cam_name]
+            img_h, img_w = img.shape[:2]
+            k = cam_intrinsics[0, cam_idx].detach().cpu().numpy()[:3, :3]
+            points_2d, depth, _ = project_3d_box_to_image(
+                box_ref,
+                nusc,
+                sample_token,
+                cam_name,
+                k,
+                is_global=not is_pred,
+            )
+            rect = clip_focus_rect(
+                projected_rect(points_2d, depth, img.shape),
+                img.shape,
+                min_area_ratio=0.00018,
+                max_area_ratio=0.88,
+            )
+            if rect is None:
+                continue
+
+            x1, y1, x2, y2 = rect
+            rect_area = float((x2 - x1) * (y2 - y1))
+            area_ratio = rect_area / float(max(1, img_w * img_h))
+            cx, cy = rect_center(rect)
+            center_dx = abs(cx - img_w * 0.5) / max(img_w * 0.5, 1.0)
+            center_dy = abs(cy - img_h * 0.58) / max(img_h * 0.58, 1.0)
+            center_score = max(0.2, 1.25 - center_dx * 0.45 - center_dy * 0.30)
+            view_score = area_ratio * 10000.0 * center_score + max(0.0, 30.0 - distance)
+
+            views.append(
+                {
+                    'cam_name': cam_name,
+                    'rect': rect,
+                    'points_2d': points_2d,
+                    'depth': depth,
+                    'view_score': view_score,
+                    'area_ratio': area_ratio,
+                }
+            )
+
+        if not views:
+            continue
+
+        views.sort(key=lambda view: view['view_score'], reverse=True)
+        priority = focus_class_priority(class_name)
+        rank_score = priority * 1000.0 + max(0.0, 80.0 - distance) * 8.0 + score * 120.0 + views[0]['view_score']
+        candidates.append(
+            {
+                'item': item,
+                'class_name': class_name,
+                'display_name': display_name,
+                'label_text': label_text,
+                'distance': distance,
+                'score': score,
+                'priority': priority,
+                'rank_score': rank_score,
+                'best_view': views[0],
+                'views': views,
+            }
+        )
+
+    candidates.sort(key=lambda candidate: candidate['rank_score'], reverse=True)
+    return candidates
+
+
+def draw_candidate_on_image(img, candidate, view, color):
+    draw_box(img, view['points_2d'], view['depth'], color, thickness=2)
+    x1, y1, x2, y2 = view['rect']
+    label_pos = (x1 + 2, max(16, y1 - 8))
+    label = candidate['label_text']
+    if candidate['distance'] > 0:
+        label = f"{label} | {candidate['distance']:.1f}m"
+    draw_text(img, label, label_pos, color, font_scale=0.52, thickness=1)
+    cv2.rectangle(img, (x1, y1), (x2, y2), color, 2, cv2.LINE_AA)
+
+
+def build_sr_detail_board(title, subtitle, items, is_pred, camera_images, cam_intrinsics, nusc, sample_token):
+    card_color = (84, 164, 255) if is_pred else (88, 224, 130)
+    accent_color = (35, 42, 52)
+    board_w, board_h = 1600, 900
+    board = np.full((board_h, board_w, 3), (12, 17, 24), dtype=np.uint8)
+    add_overlay_panel(board, (0, 0), (board_w, board_h), (24, 34, 46), alpha=0.48)
+
+    candidates = build_visual_focus_candidates(
+        items,
+        is_pred=is_pred,
+        camera_images=camera_images,
+        cam_intrinsics=cam_intrinsics,
+        nusc=nusc,
+        sample_token=sample_token,
+    )
+
+    main_cam = candidates[0]['best_view']['cam_name'] if candidates else 'CAM_FRONT'
+    main_img = camera_images.get(main_cam, camera_images['CAM_FRONT']).copy()
+    visible_in_main = []
+    for candidate in candidates:
+        for view in candidate['views']:
+            if view['cam_name'] == main_cam:
+                visible_in_main.append((candidate, view))
+                break
+    visible_in_main.sort(key=lambda pair: pair[0]['rank_score'], reverse=True)
+
+    for candidate, view in visible_in_main[:6]:
+        draw_candidate_on_image(main_img, candidate, view, card_color)
+
+    header_h = 96
+    outer_pad = 22
+    right_w = 438
+    gap = 18
+    main_w = board_w - outer_pad * 2 - right_w - gap
+    main_h = board_h - header_h - outer_pad * 2
+    crop_gap = 14
+    summary_h = 118
+    crop_start_y = header_h + summary_h + 16
+    available_crop_h = board_h - crop_start_y - outer_pad
+    crop_h = max(176, (available_crop_h - crop_gap * 2) // 3)
+    crop_w = right_w - 24
+
+    main_panel = resize_with_pad(main_img, (main_w, main_h), pad_color=(18, 24, 32))
+    main_x = outer_pad
+    main_y = header_h
+    board[main_y:main_y + main_h, main_x:main_x + main_w] = main_panel
+    cv2.rectangle(board, (main_x, main_y), (main_x + main_w, main_y + main_h), (44, 56, 70), 1, cv2.LINE_AA)
+
+    cv2.putText(board, title, (outer_pad, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.05, (238, 244, 249), 2, cv2.LINE_AA)
+    cv2.putText(board, subtitle, (outer_pad, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (166, 180, 194), 1, cv2.LINE_AA)
+    cv2.putText(board, f"Main camera: {main_cam}", (main_x + 12, main_y + 28), cv2.FONT_HERSHEY_SIMPLEX, 0.72, (236, 242, 247), 2, cv2.LINE_AA)
+
+    right_x = main_x + main_w + gap
+    right_y = header_h
+    add_overlay_panel(board, (right_x, right_y), (right_x + right_w, right_y + summary_h), accent_color, alpha=0.72)
+    cv2.rectangle(board, (right_x, right_y), (right_x + right_w, right_y + summary_h), (44, 56, 70), 1, cv2.LINE_AA)
+    cv2.putText(board, "Detail Review", (right_x + 14, right_y + 28), cv2.FONT_HERSHEY_SIMPLEX, 0.76, (240, 245, 249), 2, cv2.LINE_AA)
+    cv2.putText(board, f"Visible targets: {len(candidates)}", (right_x + 14, right_y + 60), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (194, 203, 212), 1, cv2.LINE_AA)
+    cv2.putText(board, "Priority classes: pedestrian / car / bike", (right_x + 14, right_y + 86), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (160, 174, 188), 1, cv2.LINE_AA)
+
+    crop_start_y = right_y + summary_h + 16
+    for slot in range(3):
+        card_y = crop_start_y + slot * (crop_h + crop_gap)
+        add_overlay_panel(board, (right_x, card_y), (right_x + right_w, card_y + crop_h), accent_color, alpha=0.72)
+        cv2.rectangle(board, (right_x, card_y), (right_x + right_w, card_y + crop_h), (44, 56, 70), 1, cv2.LINE_AA)
+
+        if slot >= len(candidates):
+            cv2.putText(board, "No more projected targets", (right_x + 18, card_y + 40), cv2.FONT_HERSHEY_SIMPLEX, 0.64, (220, 227, 234), 2, cv2.LINE_AA)
+            cv2.putText(board, "The current sample keeps the remaining area clean.", (right_x + 18, card_y + 72), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (156, 170, 184), 1, cv2.LINE_AA)
+            continue
+
+        candidate = candidates[slot]
+        view = candidate['best_view']
+        crop_source = camera_images[view['cam_name']].copy()
+        draw_candidate_on_image(crop_source, candidate, view, card_color)
+        crop_target_h = max(112, crop_h - 66)
+        crop_img = gentle_focus_crop(crop_source, view['rect'], (crop_w, crop_target_h), pad_ratio=0.95, min_crop_ratio=0.38)
+
+        card_img_y = card_y + 58
+        board[card_img_y:card_img_y + crop_img.shape[0], right_x + 12:right_x + 12 + crop_img.shape[1]] = crop_img
+        cv2.rectangle(
+            board,
+            (right_x + 12, card_img_y),
+            (right_x + 12 + crop_img.shape[1], card_img_y + crop_img.shape[0]),
+            (62, 78, 94),
+            1,
+            cv2.LINE_AA,
+        )
+
+        header_text = candidate['display_name']
+        if is_pred:
+            header_text = f"{header_text} {candidate['score']:.2f}"
+        cv2.putText(board, header_text, (right_x + 14, card_y + 24), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (240, 245, 249), 2, cv2.LINE_AA)
+        cv2.putText(
+            board,
+            f"{view['cam_name']} | {candidate['distance']:.1f}m",
+            (right_x + 14, card_y + 46),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.48,
+            card_color,
+            1,
+            cv2.LINE_AA,
+        )
+
+    return board
+
 def visualize(images, cam_intrinsics, gt_bboxes, gt_labels, pred_scores, pred_labels, pred_bboxes, sample_token, output_dir, nusc):
     _ = gt_bboxes, gt_labels
-    img_ref = tensor_to_bgr_image(images[0, 0])
+    img_ref = tensor_to_bgr_image(images[0, 0], detail_level='balanced')
     img_h, img_w = img_ref.shape[:2]
     sample = nusc.get('sample', sample_token)
     ego_pose = get_ego_pose(nusc, sample_token)
     lane_profile = infer_lane_profile_from_image(img_ref)
+    camera_images = {
+        cam_name: tensor_to_bgr_image(
+            images[0, cam_idx],
+            detail_level='focus' if cam_name == 'CAM_FRONT' else 'balanced',
+        )
+        for cam_idx, cam_name in enumerate(CAMERA_NAMES)
+    }
 
     gt_items = []
     gt_class_stats = {}
@@ -716,7 +1005,7 @@ def visualize(images, cam_intrinsics, gt_bboxes, gt_labels, pred_scores, pred_la
     gt_per_cam = {cam: 0 for cam in CAMERA_NAMES}
     pred_per_cam = {cam: 0 for cam in CAMERA_NAMES}
     for cam_idx, cam_name in enumerate(CAMERA_NAMES):
-        img_combined = tensor_to_bgr_image(images[0, cam_idx])
+        img_combined = camera_images[cam_name].copy()
         cv2.putText(img_combined, cam_name, (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
         k = cam_intrinsics[0, cam_idx].detach().cpu().numpy()[:3, :3]
         for gt in gt_items:
@@ -774,7 +1063,7 @@ def visualize(images, cam_intrinsics, gt_bboxes, gt_labels, pred_scores, pred_la
             best_gt = min(pool, key=lambda g: np.linalg.norm(np.array(g['box_ego'].center[:2], dtype=np.float32) - pred_xy))
 
     cam_idx = CAMERA_NAMES.index(best_cam)
-    focus_base = tensor_to_bgr_image(images[0, cam_idx])
+    focus_base = tensor_to_bgr_image(images[0, cam_idx], detail_level='focus')
     k_focus = cam_intrinsics[0, cam_idx].detach().cpu().numpy()[:3, :3]
 
     rect_gt, rect_pred = None, None
@@ -1037,20 +1326,42 @@ def visualize(images, cam_intrinsics, gt_bboxes, gt_labels, pred_scores, pred_la
     for pred in pred_items:
         pred_scene_items.append({'box': pred['box'], 'class_name': pred['class_name'], 'label': short_pred_name(pred['class_name']), 'score': pred['score']})
 
-    def compute_scene_extents(items):
-        x_values = [0.0, 8.0, 26.0]
-        y_values = [0.0, default_left_boundary, default_right_boundary]
+    def compute_scene_extents(items, reference_items=None):
+        combined_items = list(items or [])
+        if reference_items:
+            combined_items.extend(reference_items)
+
+        x_values = [0.0, 8.0, 18.0]
+        y_values = [0.0]
         z_max = 2.0
-        for obj in items:
+
+        for obj in combined_items:
             box = obj['box']
-            x_values.append(float(box.center[0]))
-            y_values.append(float(box.center[1]))
-            z_max = max(z_max, float(box.center[2] + box.wlh[2] * 0.8))
-        x_min = clamp(min(x_values) - 8.0, -10.0, 4.0)
-        x_max = clamp(max(x_values) + 16.0, 28.0, 72.0)
-        y_span = max(6.0, max(abs(min(y_values)), abs(max(y_values))) + 4.0)
-        y_span = clamp(y_span, 6.5, 16.0)
-        return (x_min, x_max), (-y_span, y_span), (0.0, clamp(z_max + 1.3, 4.6, 8.0))
+            x_val = clamp(float(box.center[0]), -8.0, 60.0)
+            y_val = clamp(float(box.center[1]), -18.0, 18.0)
+            x_values.append(x_val)
+            y_values.append(y_val)
+            z_max = max(z_max, float(box.center[2] + box.wlh[2] * 0.9))
+
+        x_array = np.array(x_values, dtype=np.float32)
+        y_array = np.array(y_values, dtype=np.float32)
+        y_center = float(np.median(y_array))
+        y_radius = float(np.percentile(np.abs(y_array - y_center), 80) + 3.6)
+
+        x_min = clamp(float(np.min(x_array)) - 6.0, -6.0, 10.0)
+        x_max = clamp(float(np.percentile(x_array, 90)) + 12.0, 18.0, 44.0)
+        if x_max - x_min < 18.0:
+            x_max = min(48.0, x_min + 18.0)
+
+        y_radius = clamp(y_radius, 5.5, 11.0)
+        y_min = clamp(y_center - y_radius, -16.0, 8.0)
+        y_max = clamp(y_center + y_radius, -8.0, 16.0)
+        if y_max - y_min < 9.0:
+            mid = (y_min + y_max) * 0.5
+            y_min = max(-16.0, mid - 4.5)
+            y_max = min(16.0, mid + 4.5)
+
+        return (x_min, x_max), (y_min, y_max), (0.0, clamp(z_max + 1.1, 4.6, 7.0))
 
     def in_range(box_ego, ranges):
         (x_min, x_max), (y_min, y_max), _ = ranges
@@ -1145,13 +1456,13 @@ def visualize(images, cam_intrinsics, gt_bboxes, gt_labels, pred_scores, pred_la
         ax.set_xlim(x_range[0], x_range[1])
         ax.set_ylim(y_range[0], y_range[1])
         ax.set_zlim(z_range[0], z_range[1])
-        ax.view_init(elev=34, azim=-118)
+        ax.view_init(elev=28, azim=-126)
         ax.set_proj_type('persp')
         ax.set_axis_off()
-        ax.set_box_aspect([1.0, 1.0, 0.3])
+        ax.set_box_aspect([1.22, 1.0, 0.34])
 
-    def render_semantic_scene(items, scene_title, is_pred):
-        scene_ranges = compute_scene_extents(items)
+    def render_semantic_scene(items, scene_title, is_pred, reference_items=None):
+        scene_ranges = compute_scene_extents(items, reference_items=reference_items)
         fig = plt.figure(figsize=(16, 9), dpi=100)
         fig.patch.set_facecolor('#F0F5FA')
         ax = fig.add_subplot(111, projection='3d')
@@ -1165,10 +1476,12 @@ def visualize(images, cam_intrinsics, gt_bboxes, gt_labels, pred_scores, pred_la
         sorted_items = sorted(items, key=lambda obj: float(np.linalg.norm(np.asarray(obj['box'].center[:2], dtype=np.float32))))
 
         label_budget = 10
+        rendered_count = 0
         for obj in sorted_items:
             box = obj['box']
             if not in_range(box, scene_ranges):
                 continue
+            rendered_count += 1
 
             x, y, z = [float(v) for v in box.center]
             w, l, h = [float(v) for v in box.wlh]
@@ -1329,6 +1642,15 @@ def visualize(images, cam_intrinsics, gt_bboxes, gt_labels, pred_scores, pred_la
             color=(0.22, 0.27, 0.33, 1.0),
             weight='bold',
         )
+        ax.text2D(
+            0.03,
+            0.90,
+            f'Objects in focus: {rendered_count}',
+            transform=ax.transAxes,
+            fontsize=9,
+            fontname='Arial',
+            color=(0.35, 0.41, 0.48, 1.0),
+        )
 
         fig.canvas.draw()
         width, height = fig.canvas.get_width_height()
@@ -1337,8 +1659,26 @@ def visualize(images, cam_intrinsics, gt_bboxes, gt_labels, pred_scores, pred_la
         plt.close(fig)
         return auto_crop_scene_image(img)
 
-    scene_gt_img = render_semantic_scene(gt_scene_items, "Surrounding Reality | Ground Truth", is_pred=False)
-    scene_pred_img = render_semantic_scene(pred_scene_items, "Surrounding Reality | Prediction", is_pred=True)
+    scene_gt_img = build_sr_detail_board(
+        "Surrounding Reality | Ground Truth",
+        "Real camera board with high-detail crops and class-focused review.",
+        gt_items,
+        is_pred=False,
+        camera_images=camera_images,
+        cam_intrinsics=cam_intrinsics,
+        nusc=nusc,
+        sample_token=sample_token,
+    )
+    scene_pred_img = build_sr_detail_board(
+        "Surrounding Reality | Prediction",
+        "Real camera board with high-detail crops and confidence-aware review.",
+        pred_items,
+        is_pred=True,
+        camera_images=camera_images,
+        cam_intrinsics=cam_intrinsics,
+        nusc=nusc,
+        sample_token=sample_token,
+    )
     scene_stream = build_scene_stream(
         sample_token=sample_token,
         sample_timestamp=sample['timestamp'],
@@ -1351,27 +1691,35 @@ def visualize(images, cam_intrinsics, gt_bboxes, gt_labels, pred_scores, pred_la
     stats = {'pred_total': len(pred_items), 'pred_details': pred_class_stats, 'gt_total': len(gt_items), 'gt_details': gt_class_stats}
     
     # 添加平面图原图（前视相机）
-    front_img = tensor_to_bgr_image(images[0, 0]) if images is not None else None
+    front_img = camera_images['CAM_FRONT'] if images is not None else None
     canvas_combined = merge_6_cams(drawn_combined, bottom_panel=bottom_img)
     
     return canvas_combined, canvas_top_pair, bev_img, scene_gt_img, scene_pred_img, front_img, stats, scene_stream
 
 def main():
-    # 简化版：写死模型路径和样本索引路径
-    checkpoint_path = './saved_models/04_10_10-21/best_model.pth'
-    # 自动从 checkpoint 目录读取 sample_indices.json
-    checkpoint_dir = os.path.dirname(checkpoint_path)
-    sample_indices_path = os.path.join(checkpoint_dir, 'sample_indices.json')
-    confidence = 0.05
-    topk = 50
-    num_samples = 2  # 默认推理2个样本
+    parser = argparse.ArgumentParser(description='TDR-QAF inference and visualization')
+    parser.add_argument('--checkpoint', type=str, default='', help='Path to best_model.pth')
+    parser.add_argument('--sample_indices', type=str, default='', help='Optional path to sample_indices.json')
+    parser.add_argument('--data_root', type=str, default='./dataset', help='NuScenes dataset root')
+    parser.add_argument('--nuscenes_version', type=str, default='v1.0-mini', help='NuScenes version')
+    parser.add_argument('--max_samples', type=int, default=None, help='Optional dataset cap for quick checks')
+    parser.add_argument('--confidence', type=float, default=0.05, help='Confidence threshold')
+    parser.add_argument('--topk', type=int, default=50, help='Maximum predictions kept after decode')
+    parser.add_argument('--num_samples', type=int, default=2, help='Number of samples to visualize')
+    args = parser.parse_args()
+
+    checkpoint_path = resolve_checkpoint_path(args.checkpoint or None)
+    sample_indices_path = resolve_sample_indices_path(checkpoint_path, args.sample_indices or None)
+    confidence = args.confidence
+    topk = args.topk
+    num_samples = args.num_samples
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'Using device: {device}')
     print(f'Confidence threshold: {confidence}')
     print(f'TopK: {topk}')
     print(f'Checkpoint path: {checkpoint_path}')
-    print(f'Sample indices path: {sample_indices_path}')
+    print(f'Sample indices path: {sample_indices_path or "None"}')
     print(f'Number of samples to inference: {num_samples}')
 
     output_dir = create_output_dir()
@@ -1384,16 +1732,19 @@ def main():
 
     try:
         dataset = NuScenesDataset(
-            root='./dataset',
+            root=args.data_root,
             debug_mode=False,
-            max_samples=None,
-            version='v1.0-mini',
+            max_samples=args.max_samples,
+            version=args.nuscenes_version,
         )
         print(f'Dataset loaded. Total samples: {len(dataset)}')
 
-        indices_data = NuScenesDataset.load_sample_indices(sample_indices_path)
-        dataset.set_sample_indices(indices_data['indices'])
-        print(f'Loaded train indices. Inference sample pool: {len(indices_data["indices"])}')
+        if sample_indices_path:
+            indices_data = NuScenesDataset.load_sample_indices(sample_indices_path)
+            dataset.set_sample_indices(indices_data['indices'])
+            print(f'Loaded train indices. Inference sample pool: {len(indices_data["indices"])}')
+        else:
+            print('No sample indices provided. Using the current dataset sample pool.')
     except Exception as e:
         print(f'Failed to load dataset: {e}')
         return

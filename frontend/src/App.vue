@@ -42,8 +42,8 @@
 
             <el-form-item label="样本模式">
               <el-radio-group v-model="mode" class="mode-switch">
-                <el-radio-button label="random">随机抽取</el-radio-button>
-                <el-radio-button label="specific">指定索引</el-radio-button>
+                <el-radio-button value="random">随机抽取</el-radio-button>
+                <el-radio-button value="specific">指定索引</el-radio-button>
               </el-radio-group>
             </el-form-item>
 
@@ -171,6 +171,35 @@
               subtitle="前视相机原图"
               :image-src="imageFront"
               status="Original"
+            />
+          </article>
+        </section>
+
+        <section class="review-grid">
+          <article class="glass-panel camera-card">
+            <CameraPanel
+              title="Backend SR"
+              subtitle="Prediction render from backend"
+              :image-src="imageSrPred"
+              status="Pred SR"
+            />
+          </article>
+
+          <article class="glass-panel camera-card">
+            <CameraPanel
+              title="Backend SR"
+              subtitle="Ground truth render from backend"
+              :image-src="imageSrGt"
+              status="GT SR"
+            />
+          </article>
+
+          <article class="glass-panel camera-card">
+            <CameraPanel
+              title="Backend BEV"
+              subtitle="Rendered BEV verification image"
+              :image-src="imageBev"
+              status="BEV"
             />
           </article>
         </section>
@@ -589,6 +618,12 @@ onUnmounted(() => {
   gap: 14px;
 }
 
+.review-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
 .fusion-card {
   grid-column: 1 / -1;
 }
@@ -635,6 +670,10 @@ onUnmounted(() => {
   }
 
   .camera-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .review-grid {
     grid-template-columns: 1fr;
   }
 }

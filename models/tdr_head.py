@@ -189,7 +189,7 @@ class TDRHead(nn.Module):
     集成 TDR-Lifting、M-RoPE 和 Transformer Decoder
     """
     def __init__(self, num_classes=10, in_channels=256, embed_dims=256 ,
-                 num_decoder_layers=6, num_depth_dense=48, max_queries=400):
+                 num_decoder_layers=6, num_depth_dense=48, max_queries=400, debug=False):
         super(TDRHead, self).__init__()
         self.num_classes = num_classes
         self.in_channels = in_channels
@@ -223,9 +223,9 @@ class TDRHead(nn.Module):
             )
             for _ in range(num_decoder_layers - 1)
         ])
-        # 调整缩放因子和开启 Debug
+        # Reference-point refinement settings.
         self.refine_scale = 0.20
-        self.debug = True
+        self.debug = debug
         
         # Query 初始化
         self.query_embed = nn.Sequential(
@@ -259,11 +259,13 @@ class TDRHead(nn.Module):
         query = self.query_embed(reference_points)
 
         # 4. Decoder 层：逐层 refinement reference_points 和 重新注入 RoPE
-        print(f"Decoder layers length: {len(self.decoder_layers)}")
-        print(f"Refine branches length: {len(self.refine_branches)}")
+        if self.debug:
+            print(f"Decoder layers length: {len(self.decoder_layers)}")
+            print(f"Refine branches length: {len(self.refine_branches)}")
         
         for layer_idx, layer in enumerate(self.decoder_layers):
-            print(f"Processing layer {layer_idx}")
+            if self.debug:
+                print(f"Processing layer {layer_idx}")
             # 【核心架构升级 1】：每层都用最新的 reference_points 重新做 RoPE 旋转
             pos_sin, pos_cos = self.m_rope(reference_points)
             query_rot = query * pos_cos + rotate_half(query) * pos_sin

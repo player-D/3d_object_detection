@@ -73,7 +73,7 @@ class TDRDetector(nn.Module):
     集成 Backbone、Neck 和 TDRHead
     """
     def __init__(self, num_classes=10, embed_dims=256 ,
-                 num_decoder_layers=6, num_depth_dense=48, max_queries=400):
+                 num_decoder_layers=6, num_depth_dense=48, max_queries=400, debug=False):
         """
         初始化
         
@@ -116,7 +116,8 @@ class TDRDetector(nn.Module):
             embed_dims=embed_dims,
             num_decoder_layers=num_decoder_layers,  # 传递参数
             num_depth_dense=num_depth_dense,        # 传递参数
-            max_queries=max_queries                 # 传递参数
+            max_queries=max_queries,                # 传递参数
+            debug=debug
         )
     
     def extract_feat(self, imgs):

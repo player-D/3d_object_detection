@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import warnings
 from scipy.optimize import linear_sum_assignment
 
 class HungarianMatcher(nn.Module):
@@ -52,7 +53,7 @@ class HungarianMatcher(nn.Module):
             return (torch.tensor(pred_indices, dtype=torch.int64, device=cls_scores.device),
                     torch.tensor(gt_indices, dtype=torch.int64, device=cls_scores.device))
         except Exception as e:
-            print(f"[WARNING] linear_sum_assignment failed: {e}. Batch has {num_gt} GTs.")
+            warnings.warn(f"linear_sum_assignment failed: {e}. Batch has {num_gt} GTs.", RuntimeWarning)
             return torch.tensor([], dtype=torch.int64, device=cls_scores.device), \
                    torch.tensor([], dtype=torch.int64, device=cls_scores.device)
 
@@ -97,7 +98,7 @@ class TDRLoss(nn.Module):
             # ================== 增强数值检查 ==================
             if (torch.isnan(cls_score).any() or torch.isinf(cls_score).any() or
                 torch.isnan(bbox_pred).any() or torch.isinf(bbox_pred).any()):
-                print(f"[WARNING] Batch {b} has NaN/Inf, skipping matching.")
+                warnings.warn(f"Batch {b} has NaN/Inf, skipping matching.", RuntimeWarning)
                 pred_indices = torch.tensor([], dtype=torch.int64, device=cls_score.device)
                 gt_indices = torch.tensor([], dtype=torch.int64, device=cls_score.device)
             else:
